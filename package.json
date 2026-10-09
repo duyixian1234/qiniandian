@@ -1,0 +1,25 @@
+{
+  "name": "qiniandian",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "天坛祈年殿 three.js 重建 —— 形制考据准确、渲染写实、运行时离线自包含",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --port 5390 --strictPort --host 127.0.0.1"
+  },
+  "dependencies": {
+    "three": "0.186.1"
+  },
+  "devDependencies": {
+    "@types/three": "0.186.0",
+    "playwright": "1.64.0",
+    "pngjs": "^7.0.0",
+    "typescript": "7.0.2",
+    "vite": "8.3.4",
+    "vitest": "3.2.4"
+  }
+}

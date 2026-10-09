@@ -1,0 +1,317 @@
+<#
+run.ps1 — 祈年殿 一键复跑（形制优先 · 渲染写实 · 运行时离线自包含）
+
+用法：
+    pwsh -File D:\lab\qiniandian\run.ps1
+    pwsh -File D:\lab\qiniandian\run.ps1 -SkipInstall
+
+纪律（沿用 D:\lab 既有约定，见 D:\lab\run-repro.ps1 与 reports\*）：
+  1. 每步 stdout/stderr 落盘到 logs\<步骤>.log
+  2. 判定只以「日志内容 + 退出码」为准
+  3. 每步打印 SENTINEL 行，便于按日志 grep 判定
+  4. 收尾清理**仅自己启动**的服务与浏览器进程（按端口/精确标识，绝不模糊匹配命令行）
+  5. 退出码 0 = 全通过；1 = 有步骤失败；**不得有静默跳过**
+
+步骤：
+  S0 预检（工具链 + HDRI 必须是真 Radiance HDR）
+  S1 pnpm install
+  S2 tsc --noEmit
+  S3 vitest run（形制单元测试）
+  S4 vite build（并校验 HDRI 进入 dist）
+  S5 启动 preview 并确认 HTTP 200 + HDRI 可达
+  S6 截图门禁（四机位，--assert）
+  S7 门禁自证（注入故障必须全部失败）
+  S8 参数生效守卫
+  S9 形制比值（出挑比 vs 参考读值）
+  S10 确定性（连跑两次截图 SHA256 一致）
+#>
+param([switch]$SkipInstall, [int]$Port = 5390)
+
+$ErrorActionPreference = 'Continue'
+$Root = $PSScriptRoot
+$LogDir = Join-Path $Root 'logs'
+$ShotRoot = Join-Path $Root 'shots'
+$Hdri = Join-Path $Root 'public\hdri\kloofendal_43d_clear_puresky_2k.hdr'
+$RefRatio = @(0.64, 0.86, 1.00)   # 人工读图（构造量），见 SPEC.md
+$RatioTol = 0.05
+
+New-Item -ItemType Directory -Force -Path $LogDir, $ShotRoot | Out-Null
+$Results = [System.Collections.Generic.List[object]]::new()
+$ServerPid = $null
+
+function Say([string]$m) { Write-Host $m }
+function Record([string]$n, [bool]$ok, [string]$detail) {
+    $Results.Add([pscustomobject]@{ Step = $n; Ok = $ok; Detail = $detail })
+    Say ("SENTINEL $n " + $(if ($ok) { 'PASS' } else { 'FAIL' }) + " :: $detail")
+}
+function Logged([string]$name, [scriptblock]$action) {
+    $out = Join-Path $LogDir "$name.log"
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    & $action *>&1 | Out-File $out -Encoding utf8
+    $sw.Stop()
+    $text = Get-Content $out -Raw -ErrorAction SilentlyContinue
+    return @{ Text = $text; Ms = $sw.ElapsedMilliseconds; Exit = $LASTEXITCODE }
+}
+function Stop-MyServer {
+    if ($null -ne $script:ServerPid) {
+        try { Stop-Process -Id $script:ServerPid -Force -ErrorAction SilentlyContinue } catch {}
+        $script:ServerPid = $null
+    }
+}
+
+# ============================================================ S0 预检
+Say '===== S0 预检 ====='
+$pre = [System.Collections.Generic.List[string]]::new()
+$ok0 = $true
+$nodeV = (& node --version 2>&1 | Out-String).Trim()
+$pnpmV = (& pnpm --version 2>&1 | Out-String).Trim()
+$pre.Add("node=$nodeV pnpm=$pnpmV")
+if (-not $nodeV -or -not $pnpmV) { $ok0 = $false; $pre.Add('MISSING node/pnpm') }
+
+foreach ($f in @('package.json', 'SPEC.md', 'vite.config.ts', 'vitest.config.ts', 'index.html',
+                 'src\massing.ts', 'src\scene.ts', 'src\main.ts', 'src\facadeTextures.ts',
+                 'scripts\capture.mjs', 'tests\massing.test.ts')) {
+    $p = Join-Path $Root $f
+    $e = Test-Path $p
+    if (-not $e) { $ok0 = $false }
+    $pre.Add(("  {0} {1}" -f $(if ($e) { 'OK  ' } else { 'MISS' }), $f))
+}
+# HDRI 必须是真 Radiance HDR，而不是空文件或错误格式
+if (Test-Path $Hdri) {
+    $b = [System.IO.File]::ReadAllBytes($Hdri)
+    $head = [System.Text.Encoding]::ASCII.GetString($b[0..127])
+    $isHdr = $head.StartsWith('#?RADIANCE') -or $head.StartsWith('#?RGBE')
+    $res = [regex]::Match($head, 'Y\s+(\d+)\s+X\s+(\d+)')
+    $pre.Add("  HDRI radiance=$isHdr res=$(if ($res.Success) { $res.Groups[2].Value + 'x' + $res.Groups[1].Value } else { '?' }) bytes=$($b.Length)")
+    if (-not $isHdr) { $ok0 = $false }
+} else { $ok0 = $false; $pre.Add('  HDRI MISSING') }
+$pre | ForEach-Object { Say $_ }
+($pre -join "`n") | Out-File (Join-Path $LogDir 'S0-precheck.log') -Encoding utf8
+Record 'S0-precheck' $ok0 "node=$nodeV pnpm=$pnpmV"
+
+# ============================================================ S1 install
+if (-not $SkipInstall) {
+    Say "`n===== S1 pnpm install ====="
+    Push-Location $Root
+    $r = Logged 'S1-install' { & pnpm install --reporter=append-only }
+    Pop-Location
+    $ok = Test-Path (Join-Path $Root 'node_modules\vite\bin\vite.js')
+    Record 'S1-install' $ok "vite bin present=$ok ($($r.Ms) ms)"
+}
+
+# ============================================================ S2 typecheck
+Say "`n===== S2 tsc --noEmit ====="
+Push-Location $Root
+$r = Logged 'S2-typecheck' { & pnpm exec tsc --noEmit }
+Pop-Location
+$tsc = $r.Exit -eq 0
+Record 'S2-typecheck' $tsc "clean=$tsc ($($r.Ms) ms)"
+
+# ============================================================ S3 unit tests
+Say "`n===== S3 vitest run ====="
+Push-Location $Root
+$r = Logged 'S3-vitest' { & pnpm exec vitest run --reporter=basic }
+Pop-Location
+$vt = $r.Exit -eq 0
+$vtLine = ([regex]::Match($r.Text, 'Tests\s+(\d+ passed[^\n]*)')).Groups[1].Value
+Record 'S3-vitest' $vt "exit=$($r.Exit) $vtLine"
+
+# ============================================================ S4 build
+Say "`n===== S4 vite build ====="
+Push-Location $Root
+$r = Logged 'S4-build' { & pnpm exec vite build }
+Pop-Location
+$built = $r.Text -match 'built in'
+$hdriInDist = Test-Path (Join-Path $Root 'dist\hdri\kloofendal_43d_clear_puresky_2k.hdr')
+$bundle = ([regex]::Match($r.Text, 'dist/assets/index-[\w-]+\.js\s+([\d.]+) kB')).Groups[1].Value
+Record 'S4-build' ($built -and $hdriInDist) "built=$built hdri_in_dist=$hdriInDist bundle=$bundle kB"
+
+# ============================================================ S5 preview server
+$ServerUp = $false
+if ($built) {
+    Say "`n===== S5 启动 preview (port $Port) ====="
+    # 必须显式 -WorkingDirectory：vite preview 以 CWD 为基准找 dist，
+    # 沿用调用方 CWD 会报 "The directory dist does not exist"（已实测）。
+    $srv = Start-Process -FilePath 'node' `
+        -ArgumentList (Join-Path $Root 'node_modules\vite\bin\vite.js'), 'preview',
+                      '--port', "$Port", '--strictPort', '--host', '127.0.0.1' `
+        -WorkingDirectory $Root -PassThru -WindowStyle Hidden `
+        -RedirectStandardOutput (Join-Path $LogDir 'S5-server.out.log') `
+        -RedirectStandardError (Join-Path $LogDir 'S5-server.err.log')
+    $script:ServerPid = $srv.Id
+    Start-Sleep -Seconds 8
+    $code = [string]((& curl.exe -sS -m 15 -o NUL -w '%{http_code}' "http://127.0.0.1:$Port/" 2>&1) -join '')
+    $hdriCode = [string]((& curl.exe -sS -m 15 -o NUL -w '%{http_code}' "http://127.0.0.1:$Port/hdri/kloofendal_43d_clear_puresky_2k.hdr" 2>&1) -join '')
+    $ServerUp = ($code -eq '200')
+    Say "  GET / -> $code   HDRI -> $hdriCode   pid=$($srv.Id)"
+    ("GET / -> $code`nHDRI -> $hdriCode`n" + (Get-Content (Join-Path $LogDir 'S5-server.err.log') -Raw -ErrorAction SilentlyContinue)) |
+        Out-File (Join-Path $LogDir 'S5-server.log') -Encoding utf8
+    Record 'S5-server' ($ServerUp -and $hdriCode -eq '200') "http=$code hdri=$hdriCode port=$Port"
+} else {
+    Record 'S5-server' $false 'skipped: no build'
+}
+$Base = "http://127.0.0.1:$Port/"
+
+# 服务未起来时，后续步骤必须显式记 FAIL —— 绝不静默跳过（否则脚本会"绿色退出"但没做检查）
+if (-not $ServerUp) {
+    foreach ($n in 'S6-gate', 'S7-selftest', 'S8-paramguard', 'S9-ratios', 'S10-determinism') {
+        Record $n $false 'skipped: preview server did not start'
+    }
+    Say "`n[!] 预览服务未启动，S6–S10 全部记为 FAIL（不静默跳过）"
+}
+
+# ============================================================ S6 截图门禁
+if ($ServerUp) {
+    Say "`n===== S6 截图门禁（四机位，应 exit 0）====="
+    Remove-Item (Join-Path $ShotRoot 'gate') -Recurse -Force -ErrorAction SilentlyContinue
+    Push-Location $Root
+    $r = Logged 'S6-gate' {
+        & node (Join-Path $Root 'scripts\capture.mjs') $Base (Join-Path $ShotRoot 'gate') 1280 720 `
+            'hero:2' 'front:2' 'low:2' 'top:2' --assert
+    }
+    Pop-Location
+    $g = $r.Exit -eq 0
+    $fails = ([regex]::Match($r.Text, '"failures":\s*\[(.*?)\]', 'Singleline')).Groups[1].Value.Trim()
+    Record 'S6-gate' $g "exit=$($r.Exit) failures=[$fails]"
+}
+
+# ============================================================ S7 门禁自证
+if ($ServerUp) {
+    Say "`n===== S7 门禁自证（注入故障必须全部 exit 1）====="
+    $cases = @(
+        @{ n = 'env';  tok = 'hero:2:env' },      # 缺失 HDRI
+        @{ n = 'warn'; tok = 'hero:2:warn' },     # 页面错误
+        @{ n = 'gap';  tok = 'hero:2:gap' }       # 形制断口
+    )
+    $all = $true
+    $det = [System.Collections.Generic.List[string]]::new()
+    foreach ($c in $cases) {
+        Push-Location $Root
+        $rr = Logged "S7-$($c.n)" {
+            & node (Join-Path $Root 'scripts\capture.mjs') $Base (Join-Path $ShotRoot "st-$($c.n)") 1280 720 `
+                "$($c.tok)|env=1" --assert
+        }
+        Pop-Location
+        $bit = $rr.Exit -eq 1
+        if (-not $bit) { $all = $false }
+        $f = ([regex]::Match($rr.Text, '"failures":\s*\[(.*?)\]', 'Singleline')).Groups[1].Value.Trim()
+        $det.Add("  $($c.n): exit=$($rr.Exit) (want 1) failures=[$f]")
+    }
+    $det | ForEach-Object { Say $_ }
+    ($det -join "`n") | Out-File (Join-Path $LogDir 'S7-selftest.log') -Encoding utf8
+    Record 'S7-selftest' $all 'all injected faults produced exit 1'
+}
+
+# ============================================================ S8 参数生效守卫
+if ($ServerUp) {
+    Say "`n===== S8 参数生效守卫 ====="
+    $cases = @(
+        @{ n = 'match';    tok = 'hero:2|env=1,envint=0.25,expect=envint~0.25'; want = 0 },
+        @{ n = 'mismatch'; tok = 'hero:2|env=1,envint=0.25,expect=envint~0.9';  want = 1 },
+        @{ n = 'unknown';  tok = 'hero:2|env=1,expect=noSuchParam~1';           want = 1 }
+    )
+    $all = $true
+    $det = [System.Collections.Generic.List[string]]::new()
+    foreach ($c in $cases) {
+        Push-Location $Root
+        $rr = Logged "S8-$($c.n)" {
+            & node (Join-Path $Root 'scripts\capture.mjs') $Base (Join-Path $ShotRoot "pg-$($c.n)") 1280 720 `
+                $c.tok --assert
+        }
+        Pop-Location
+        $okCase = $rr.Exit -eq $c.want
+        if (-not $okCase) { $all = $false }
+        $f = ([regex]::Match($rr.Text, '"failures":\s*\[(.*?)\]', 'Singleline')).Groups[1].Value.Trim()
+        $det.Add("  $($c.n): exit=$($rr.Exit) (want $($c.want)) failures=[$f]")
+    }
+    $det | ForEach-Object { Say $_ }
+    ($det -join "`n") | Out-File (Join-Path $LogDir 'S8-paramguard.log') -Encoding utf8
+    Record 'S8-paramguard' $all 'accepted-but-ineffective params are detected'
+}
+
+# ============================================================ S9 形制比值（实测渲染）
+if ($ServerUp) {
+    Say "`n===== S9 三重檐出挑比 vs 参考读值（量测渲染剪影）====="
+    # 关键：必须量测**渲染结果**，不能回读建模常量。把用于建模的常量再和参考值比较是同义反复，
+    # 永远相等、永远发现不了几何错误（第一版就是如此，worst 恒为 0）。
+    $silDir = Join-Path $ShotRoot 'silhouette'
+    Remove-Item $silDir -Recurse -Force -ErrorAction SilentlyContinue
+    Push-Location $Root
+    $rr = Logged 'S9-render' {
+        & node (Join-Path $Root 'scripts\capture.mjs') $Base $silDir 1280 720 `
+            'elev:2|silhouette=1,projection=ortho' --assert
+    }
+    Pop-Location
+    $silFile = Get-ChildItem $silDir -Filter *.png -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($silFile) {
+        $m = Logged 'S9-measure' { & node (Join-Path $Root 'scripts\measure-eave-ratios.mjs') $silFile.FullName }
+        $measured = $null
+        try { $measured = ($m.Text | ConvertFrom-Json) } catch { $measured = $null }
+        if ($measured -and $measured.ok) {
+            $ok = [double]$measured.worst -le $RatioTol
+            Record 'S9-ratios' $ok ("measured=" + ($measured.ratios -join ':') +
+                " ref=" + ($measured.reference -join ':') +
+                " worst=$($measured.worst) tol=$RatioTol (from rendered silhouette)")
+        } else {
+            Record 'S9-ratios' $false ("measurement failed: " + $(if ($measured) { $measured.reason } else { 'unparsable output' }))
+        }
+    } else {
+        Record 'S9-ratios' $false 'silhouette render produced no PNG'
+    }
+}
+
+# ============================================================ S10 确定性
+if ($ServerUp) {
+    Say "`n===== S10 确定性（连跑两次截图必须字节一致）====="
+    $dirA = Join-Path $ShotRoot 'det-a'; $dirB = Join-Path $ShotRoot 'det-b'
+    Remove-Item $dirA, $dirB -Recurse -Force -ErrorAction SilentlyContinue
+    Push-Location $Root
+    $null = Logged 'S10-run-a' {
+        & node (Join-Path $Root 'scripts\capture.mjs') $Base $dirA 1280 720 'hero:2' 'front:2'
+    }
+    Start-Sleep -Seconds 2
+    $null = Logged 'S10-run-b' {
+        & node (Join-Path $Root 'scripts\capture.mjs') $Base $dirB 1280 720 'hero:2' 'front:2'
+    }
+    Pop-Location
+    $ha = @(Get-ChildItem $dirA -Filter *.png -ErrorAction SilentlyContinue | Sort-Object Name |
+        ForEach-Object { (Get-FileHash $_.FullName -Algorithm SHA256).Hash })
+    $hb = @(Get-ChildItem $dirB -Filter *.png -ErrorAction SilentlyContinue | Sort-Object Name |
+        ForEach-Object { (Get-FileHash $_.FullName -Algorithm SHA256).Hash })
+    $same = ($ha.Count -gt 0) -and ($ha.Count -eq $hb.Count) -and
+            (@(0..($ha.Count - 1) | Where-Object { $ha[$_] -ne $hb[$_] }).Count -eq 0)
+    Record 'S10-determinism' $same "shots=$($ha.Count) identical=$same"
+}
+
+# ============================================================ 汇总与清理
+Say "`n===== 清理 ====="
+Stop-MyServer
+Say '  已停止本次启动的预览服务（若有）'
+# 仅按精确标识清理 playwright 探针浏览器；绝不模糊匹配命令行（会杀掉自己的 job runner）
+$stray = @(Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -match 'playwright_chromiumdev_profile' })
+foreach ($p in $stray) { try { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }
+Say "  清理 playwright 探针浏览器：$($stray.Count) 个"
+
+$pass = @($Results | Where-Object { $_.Ok }).Count
+$total = @($Results).Count
+$skipped = @($Results | Where-Object { -not $_.Ok -and $_.Detail -like 'skipped:*' }).Count
+$lines = [System.Collections.Generic.List[string]]::new()
+$lines.Add("祈年殿 run.ps1 汇总  $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
+$lines.Add("node=$nodeV pnpm=$pnpmV")
+$lines.Add('')
+foreach ($r in $Results) {
+    $lines.Add(("{0} {1,-16} {2}" -f $(if ($r.Ok) { 'PASS' } else { 'FAIL' }), $r.Step, $r.Detail))
+}
+$lines.Add('')
+$lines.Add("TOTAL $pass/$total PASS  (skipped=$skipped)")
+# 覆盖率守卫：步骤齐备且无静默跳过，防止"绿色但没跑关键检查"的假阳性
+$guard = ($total -ge 10 -and $skipped -eq 0)
+if ($total -lt 10) { $lines.Add("GUARD FAIL: only $total steps recorded, expected >= 10") }
+if ($skipped -gt 0) { $lines.Add("GUARD FAIL: $skipped step(s) were skipped") }
+($lines -join "`n") | Out-File (Join-Path $LogDir 'SUMMARY.log') -Encoding utf8
+
+Say "`n===== 汇总 ====="
+$lines | ForEach-Object { Say $_ }
+Say "SUMMARY $pass/$total PASS :: logs=$LogDir"
+if ($pass -eq $total -and $guard) { exit 0 } else { exit 1 }

@@ -1,0 +1,25 @@
+# 依赖与构建产物
+node_modules/
+dist/
+.pnpm-store/
+
+# 运行日志与截图产物（可由 run.ps1 重新生成）
+logs/
+shots/
+.run*.log
+.red.log
+.green.log
+.capture.log
+.install.log
+.preview.out
+.preview.err
+.p2.out
+.p2.err
+.p3.out
+.p3.err
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+.DS_Store
