@@ -69,9 +69,11 @@ $pnpmV = (& pnpm --version 2>&1 | Out-String).Trim()
 $pre.Add("node=$nodeV pnpm=$pnpmV")
 if (-not $nodeV -or -not $pnpmV) { $ok0 = $false; $pre.Add('MISSING node/pnpm') }
 
-foreach ($f in @('package.json', 'SPEC.md', 'vite.config.ts', 'vitest.config.ts', 'index.html',
-                 'src\massing.ts', 'src\scene.ts', 'src\main.ts', 'src\facadeTextures.ts',
-                 'scripts\capture.mjs', 'tests\massing.test.ts')) {
+foreach ($f in @('package.json', 'SPEC.md', 'CREDITS.md', 'vite.config.ts', 'vitest.config.ts',
+                 'index.html', 'src\massing.ts', 'src\scene.ts', 'src\main.ts',
+                 'src\facadeTextures.ts', 'scripts\capture.mjs', 'scripts\measure-eave-ratios.mjs',
+                 'scripts\measure-glaze.mjs', 'scripts\visual-review.ps1', 'public\favicon.svg',
+                 'tests\massing.test.ts')) {
     $p = Join-Path $Root $f
     $e = Test-Path $p
     if (-not $e) { $ok0 = $false }

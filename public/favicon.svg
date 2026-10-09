@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="祈年殿">
+  <!-- 极简祈年殿剪影：三重檐 + 宝顶。用项目主色：蓝釉近似 #2f4f8f、朱红 #8f3226。 -->
+  <rect width="64" height="64" fill="#e8eef5"/>
+  <!-- 三重檐（上窄下宽） -->
+  <path d="M32 10 L44 24 H20 Z" fill="#2f4f8f"/>
+  <path d="M32 22 L48 36 H16 Z" fill="#3b4160"/>
+  <path d="M32 34 L54 50 H10 Z" fill="#2f4f8f"/>
+  <!-- 墙身 -->
+  <rect x="22" y="50" width="20" height="8" fill="#8f3226"/>
+  <!-- 宝顶 -->
+  <circle cx="32" cy="7" r="3" fill="#c9a24a"/>
+</svg>

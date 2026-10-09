@@ -2,7 +2,12 @@
 <html lang="zh">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>祈年殿 — 天坛祈年殿 three.js 重建</title>
+  <!-- 提供 favicon 可消除浏览器对 /favicon.ico 的隐式 404 探测。
+       截图门禁已显式忽略该探测，但它会让 playwright-cli 的人工评审每次都显示
+       "Console: 1 errors"，容易被误读为页面故障，故补上。 -->
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <style>
     html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #000; }
     canvas { display: block; }
