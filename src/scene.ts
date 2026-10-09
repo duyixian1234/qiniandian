@@ -353,7 +353,7 @@ export function buildScene(opts: SceneOptions = {}): BuiltScene {
   const envInfo: EnvInfo = { requested: useEnv, loaded: false, error: null, pmrem: false };
 
   async function loadEnvironment() {
-    if (!useEnv) return envInfo;
+    if (!useEnv) { info.hasEnvironment = false; return envInfo; }
     try {
       // three 0.186.1: RGBELoader 已废弃（仅 extends HDRLoader 并 warn），
       // 且 HDRLoader 只接受 HalfFloatType（默认）或 FloatType。不要调 setDataType。
@@ -374,6 +374,11 @@ export function buildScene(opts: SceneOptions = {}): BuiltScene {
       envInfo.error = String((e as Error)?.message ?? e);
       console.error('ENV_LOAD_FAILED ' + envInfo.error);
     }
+    // hasEnvironment 必须在**装配完成后**回读：info 在 buildScene() 里就构造好了，
+    // 那一刻 scene.environment 必然还是 null（IBL 是异步加载的），
+    // 因此早先版本恒报 false —— 一个"字段存在但永远错误"的静默 bug，
+    // 由 scripts/verify-offline.mjs 的实测发现。
+    info.hasEnvironment = scene.environment !== null;
     return envInfo;
   }
 

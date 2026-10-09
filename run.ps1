@@ -72,7 +72,8 @@ if (-not $nodeV -or -not $pnpmV) { $ok0 = $false; $pre.Add('MISSING node/pnpm') 
 foreach ($f in @('package.json', 'SPEC.md', 'CREDITS.md', 'vite.config.ts', 'vitest.config.ts',
                  'index.html', 'src\massing.ts', 'src\scene.ts', 'src\main.ts',
                  'src\facadeTextures.ts', 'scripts\capture.mjs', 'scripts\measure-eave-ratios.mjs',
-                 'scripts\measure-glaze.mjs', 'scripts\visual-review.ps1', 'public\favicon.svg',
+                 'scripts\measure-glaze.mjs', 'scripts\verify-offline.mjs',
+                 'scripts\visual-review.ps1', 'public\favicon.svg',
                  'tests\massing.test.ts')) {
     $p = Join-Path $Root $f
     $e = Test-Path $p
@@ -164,10 +165,10 @@ $Base = "http://127.0.0.1:$Port/"
 # 服务未起来时，后续步骤必须显式记 FAIL —— 绝不静默跳过（否则脚本会"绿色退出"但没做检查）
 if (-not $ServerUp) {
     foreach ($n in 'S6-gate', 'S7-selftest', 'S8-paramguard', 'S9-ratios', 'S9b-ratio-selftest',
-                    'S11-glaze', 'S10-determinism') {
+                    'S11-glaze', 'S12-offline', 'S10-determinism') {
         Record $n $false 'skipped: preview server did not start'
     }
-    Say "`n[!] 预览服务未启动，S6–S11 全部记为 FAIL（不静默跳过）"
+    Say "`n[!] 预览服务未启动，S6–S12 全部记为 FAIL（不静默跳过）"
 }
 
 # ============================================================ S6 截图门禁
@@ -333,6 +334,32 @@ if ($ServerUp) {
     }
 }
 
+# ============================================================ S12 离线自包含（实测）
+if ($ServerUp) {
+    Say "`n===== S12 离线自包含实测（阻断一切非本地请求）====="
+    # 目标要求"运行时完全离线自包含"。只"看代码里没有 http"不构成证明，
+    # 故实测：拦截并阻断所有非 127.0.0.1/localhost 的请求，然后确认场景仍正常渲染。
+    Push-Location $Root
+    $r = Logged 'S12-offline' {
+        & node (Join-Path $Root 'scripts\verify-offline.mjs') $Base
+    }
+    Pop-Location
+    # 输出形如：{ ...json... }\n\nOFFLINE_SELF_CONTAINED=true  (external requests = 0)\nRENDER_OK...
+    # 直接 ConvertFrom-Json 会因尾部诊断行而失败，故只取第一个完整的 JSON 对象。
+    $oj = $null
+    $ojOk = $false
+    $m = [regex]::Match($r.Text, '\{.*\}', 'Singleline')
+    if ($m.Success) {
+        try { $oj = $m.Value | ConvertFrom-Json; $ojOk = $true } catch { $ojOk = $false }
+    }
+    $offlineOk = ($r.Exit -eq 0) -and $ojOk -and ($oj.externalRequests -eq 0) -and
+                 ($oj.envLoaded -eq $true) -and ($oj.hasEnvironment -eq $true)
+    Record 'S12-offline' $offlineOk (
+        "exit=$($r.Exit) jsonParsed=$ojOk externalRequests=$(if ($ojOk) { $oj.externalRequests } else { '?' }) " +
+        "envLoaded=$(if ($ojOk) { $oj.envLoaded } else { '?' }) hasEnvironment=$(if ($ojOk) { $oj.hasEnvironment } else { '?' }) " +
+        "pageErrors=$(if ($ojOk) { $oj.pageErrors.Count } else { '?' })")
+}
+
 # ============================================================ S10 确定性
 if ($ServerUp) {
     Say "`n===== S10 确定性（连跑两次截图必须字节一致）====="
@@ -382,8 +409,8 @@ foreach ($r in $Results) {
 $lines.Add('')
 $lines.Add("TOTAL $pass/$total PASS  (silentSkips=$skipped explicitSkips=$explicitSkips)")
 # 覆盖率守卫：步骤齐备且无**静默**跳过，防止"绿色但没跑关键检查"的假阳性。
-# 下限 12 = S0..S11（含 S9b），使"少记录一步"这类问题无法再绕开守卫。
-$expectedSteps = 12
+# 下限 14 = S0..S12（含 S9b、S11、S12），使"少记录一步"这类问题无法再绕开守卫。
+$expectedSteps = 14
 $guard = ($total -ge $expectedSteps -and $skipped -eq 0)
 if ($total -lt $expectedSteps) { $lines.Add("GUARD FAIL: only $total steps recorded, expected >= $expectedSteps") }
 if ($skipped -gt 0) { $lines.Add("GUARD FAIL: $skipped step(s) were silently skipped") }
