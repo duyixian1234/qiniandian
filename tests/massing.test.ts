@@ -1,9 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import {
   SOURCED,
+  DERIVED,
   planSegmentStack,
   eaveRadii,
   assertSourcedCounts,
+  stairwayLayout,
 } from '../src/massing.js';
 
 // ---------------------------------------------------------------------------------------
@@ -59,12 +61,33 @@ describe('SOURCED counts (form facts that must not silently regress)', () => {
 
   it('has 8 stairways per terrace tier (北京文博 2000: 各出八陛)', () => {
     expect(SOURCED.stairwaysPerTier).toBe(8);
-    // recorded as 3 south + 3 north + 1 east + 1 west
-    expect(SOURCED.stairwayLayout).toHaveLength(8);
-    expect(SOURCED.stairwayLayout.filter((s) => s.face === 'south')).toHaveLength(3);
-    expect(SOURCED.stairwayLayout.filter((s) => s.face === 'north')).toHaveLength(3);
-    expect(SOURCED.stairwayLayout.filter((s) => s.face === 'east')).toHaveLength(1);
-    expect(SOURCED.stairwayLayout.filter((s) => s.face === 'west')).toHaveLength(1);
+    const layout = stairwayLayout();
+    // counts are the SOURCED part
+    expect(layout).toHaveLength(8);
+    expect(layout.filter((s) => s.face === 'south')).toHaveLength(3);
+    expect(layout.filter((s) => s.face === 'north')).toHaveLength(3);
+    expect(layout.filter((s) => s.face === 'east')).toHaveLength(1);
+    expect(layout.filter((s) => s.face === 'west')).toHaveLength(1);
+  });
+
+  it('keeps the sourced stairway COUNT separate from the derived spacing', () => {
+    // The source gives the count (3 south, 3 north, 1 + 1 sides) but no spacing, so the
+    // offsets are constructed. They must live in DERIVED, not SOURCED, so that a reader can
+    // tell which numbers are attested and which are ours.
+    const layout = stairwayLayout();
+    const spreads = layout.filter((s) => s.face === 'south').map((s) => s.offset);
+    expect(spreads).toEqual([...DERIVED.stairwayOffsets]);
+    expect(DERIVED.stairwayOffsets.length).toBe(3);
+    // constructed offsets must be symmetric about the axis and non-overlapping
+    expect(DERIVED.stairwayOffsets[0]).toBe(0);
+    expect(DERIVED.stairwayOffsets[1]).toBe(-DERIVED.stairwayOffsets[2]);
+  });
+
+  it('builds 8 stairways on EVERY tier, i.e. 24 flights in total', () => {
+    // The source says 三层坛体各出八陛 — all three tiers have eight. An earlier
+    // implementation skipped the lowest tier, building only 16.
+    const perTier = stairwayLayout().length;
+    expect(perTier * SOURCED.terraceTiers).toBe(24);
   });
 
   it('has 108 balustrade panels per terrace tier (北京文博 2000: 各层栏板数均为一百零八块)', () => {
@@ -76,13 +99,16 @@ describe('SOURCED counts (form facts that must not silently regress)', () => {
     expect(SOURCED.eaveTiers).toBe(3);
   });
 
-  it('assembleSourcedCounts returns every checked count with a pass flag', () => {
+  it('reports every checked count with a pass flag', () => {
     const checks = assertSourcedCounts();
     const byName = Object.fromEntries(checks.map((c) => [c.name, c]));
     for (const n of ['columns', 'panelsPerTier', 'stairwaysPerTier', 'eaveTiers', 'terraceTiers', 'columnRings']) {
       expect(byName[n], `missing check ${n}`).toBeDefined();
     }
     expect(checks.every((c) => c.ok)).toBe(true);
+    // expectations must be independent literals, not recomputed from SOURCED
+    expect(byName.columns.expected).toBe(28);
+    expect(byName.panelsPerTier.expected).toBe(108);
   });
 
   it('assertSourcedCounts detects a corrupted count (proves the check can fail)', () => {
@@ -177,11 +203,21 @@ describe('planSegmentStack — heights close exactly (S1 seam)', () => {
 
 describe('eaveRadii — overhang ratio from the reference reading (S2 seam)', () => {
   it('matches the photographed ratio 0.64 : 0.86 : 1.00 within 0.01', () => {
+    // Expected values are independent literals read off a photograph, NOT recomputed from
+    // DERIVED.eaveRatioTopToBottom — otherwise this could never disagree with the code.
     const [rTop, rMid, rBot] = eaveRadii();
-    const bottom = rBot;
-    expect(rTop / bottom).toBeCloseTo(0.64, 2);
-    expect(rMid / bottom).toBeCloseTo(0.86, 2);
-    expect(bottom / bottom).toBeCloseTo(1.0, 6);
+    expect(rTop / rBot).toBeCloseTo(0.64, 2);
+    expect(rMid / rBot).toBeCloseTo(0.86, 2);
+    // the bottom tier defines the scale, so its ratio is 1 by construction; assert the
+    // absolute radius instead, which is a real constraint rather than x/x.
+    expect(rBot).toBeCloseTo(DERIVED.bottomEaveRadius, 6);
+  });
+
+  it('scales all three radii proportionally when the bottom radius changes', () => {
+    // A genuine invariant: doubling the reference radius must double every tier.
+    const a = eaveRadii();
+    const b = eaveRadii({ bottomRadius: DERIVED.bottomEaveRadius * 2 });
+    for (let i = 0; i < 3; i++) expect(b[i] / a[i]).toBeCloseTo(2, 6);
   });
 
   it('orders the radii bottom > middle > top', () => {
@@ -199,12 +235,13 @@ describe('eaveRadii — overhang ratio from the reference reading (S2 seam)', ()
     expect(rTop).toBeGreaterThan(wallRadii[2]);
   });
 
-  it('is pure and honours an overridden bottom radius', () => {
-    const a = eaveRadii();
-    const b = eaveRadii();
-    expect(a).toEqual(b);
+  it('is pure and applies the reference ratio at any bottom radius', () => {
+    expect(eaveRadii()).toEqual(eaveRadii());
+    // at a bottom radius of 40, the top tier must land at 0.64 * 40 = 25.6 (independent
+    // literal), and the middle at 0.86 * 40 = 34.4 — not just "c[2] equals what we passed".
     const c = eaveRadii({ bottomRadius: 40 });
+    expect(c[0]).toBeCloseTo(25.6, 6);
+    expect(c[1]).toBeCloseTo(34.4, 6);
     expect(c[2]).toBeCloseTo(40, 6);
-    expect(c[0] / c[2]).toBeCloseTo(0.64, 2);
   });
 });

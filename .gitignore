@@ -11,12 +11,11 @@ shots/
 .green.log
 .capture.log
 .install.log
-.preview.out
-.preview.err
-.p2.out
-.p2.err
-.p3.out
-.p3.err
+# 任意由本地预览服务生成的临时输出（.pN.out/.pN.err 等）
+.p*.out
+.p*.err
+preview.out
+preview.err
 
 # 编辑器
 .vscode/

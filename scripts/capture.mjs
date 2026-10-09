@@ -82,17 +82,28 @@ try {
     const a = scene?.assertions ?? {};
     // 只有请求了 IBL 才要求它加载成功；否则不误伤 env=0 的对照。
     const envRequested = scene?.env?.requested === true;
-    checks.push(['segmentGapMarginal', Math.abs(scene?.assertions?.segmentGap ?? 0) <= 1e-3]);
-    checks.push(['stairwaysPerTierIs8', scene?.stairwaysPerTier === 8]);
-    checks.push(['panelsPerTierIs108', scene?.panelsPerTier === 108]);
+    // §4.4：总高 36.8 ± 0.15
+    checks.push(['totalHeightOk', a.totalHeightOk === true]);
+    checks.push(['segmentsClosedOk', a.segmentsClosedOk === true]);
+    checks.push(['segmentGapMarginal', Math.abs(a.segmentGap ?? 0) <= 1e-3]);
+    // §4.5 考据计数：**应然**（SOURCED）与**实然**（built）都要对。
+    // 只查其一是不够的：只看 SOURCED 是回读常量（回归也能通过），只看 built 则不知目标。
     checks.push(['columnsIs28', scene?.columns === 28]);
+    checks.push(['panelsPerTierIs108', scene?.panelsPerTier === 108]);
+    checks.push(['stairwaysPerTierIs8', scene?.stairwaysPerTier === 8]);
     checks.push(['eaveTiersIs3', scene?.eaveTiers === 3]);
     checks.push(['sourcedCountsAllOk', Array.isArray(scene?.counts) && scene.counts.every((c) => c.ok)]);
+    checks.push(['builtColumnsIs24', scene?.built?.columns === 24]);        // 外观范围：12 金 + 12 檐
+    checks.push(['builtPanelsIs324', scene?.built?.panels === 324]);        // 108 × 3 层
+    checks.push(['builtStairFlightsIs24', scene?.built?.stairFlights === 24]); // 8 处 × 3 层
+    checks.push(['builtEavesIs3', scene?.built?.eaves === 3]);
     if (envRequested) checks.push(['envLoadedOk', a.envLoadedOk === true]);
     // 忽略浏览器隐式的 /favicon.ico 探测：它缺失不是场景缺陷
     const realFailures = failedResponses.filter((s) => !/\/favicon\.ico$/.test(s));
     checks.push(['noPageErrors', consoleErrors.filter((s) => s.startsWith('pageerror:')).length === 0]);
-    checks.push(['noFailedResources', realFailures.length === 0]);
+    // 资源完整性必须同时看 response>=400 与 requestfailed（后者是网络层失败，状态码可能缺失）。
+    // 早先只检查 failedResponses，导致 failedRequests 收集了却从不参与判定。
+    checks.push(['noFailedResources', realFailures.length === 0 && failedRequests.length === 0]);
     if (expectParams) {
       for (const [k, want] of Object.entries(expectParams)) {
         const got = scene?.[k];

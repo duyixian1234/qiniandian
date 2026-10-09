@@ -2,10 +2,12 @@ import * as THREE from 'three';
 import { HDRLoader } from 'three/addons/loaders/HDRLoader.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { latticeTexture, caihuaTexture } from './facadeTextures.js';
-import { SOURCED, planSegmentStack, eaveRadii, assertSourcedCounts } from './massing.js';
+import { SOURCED, planSegmentStack, eaveRadii, assertSourcedCounts, stairwayLayout } from './massing.js';
 
-// 祈年殿场景装配。所有几何尺寸都来自 src/massing.ts（已由 tests/massing.test.ts 覆盖），
-// 本文件只负责"把形制变成 three.js 物体"，不重新定义任何考据数字。
+// 祈年殿场景装配。所有**尺寸**来自 src/massing.ts（已由 tests/massing.test.ts 覆盖）；
+// 本文件只负责"把形制变成 three.js 物体"，不重新定义任何考据尺寸。
+// 例外并已显式标注：宝顶的**零件分段**（莲花座/宝珠/尖锥）与各材质的**颜色/粗糙度**
+// 属外观参数，不属形制尺寸，故在本文件内设定（宝顶总高仍取 SOURCED.finialHeight）。
 //
 // 关键结构事实（实测确认，见 ../.probe/FACTS.md）：祈年殿是 **墙→檐→墙→檐→墙→檐 交替**，
 // 不是"檐叠檐"。按檐叠檐做会出现三重檐漂浮分离的假象。
@@ -43,13 +45,19 @@ const CAMS: Record<string, { pos: [number, number, number]; look: [number, numbe
   elev: { pos: [0, 18.4, 300], look: [0, 18.4, 0] },
 };
 
-/** 凹曲屋面剖面：脊部陡、檐口缓、檐端微翘——祈年殿的标志性轮廓。 */
+/** 统计几何的三角形数（index 存在时按 index 计）。 */
+function countTriangles(g: THREE.BufferGeometry): number {
+  return g.index ? g.index.count / 3 : (g.attributes.position?.count ?? 0) / 3;
+}
+
+/** 凹曲屋面剖面：脊部陡、檐口缓、檐端微翘——祈年殿的标志性轮廓。
+ *  t 的取值区间由 t0/t1 限定：瓦垄用 t0>0 在檐口前收齐，避免盒体厚度越出檐边。 */
 export function roofProfile(
-  rEave: number, rRidge: number, h: number, upturn: number, N = 28,
+  rEave: number, rRidge: number, h: number, upturn: number, N = 28, t0 = 0, t1 = 1,
 ): THREE.Vector2[] {
   const pts: THREE.Vector2[] = [];
   for (let i = 0; i <= N; i++) {
-    const t = i / N;                                    // 0 在檐口，1 在脊部
+    const t = t0 + (t1 - t0) * (i / N);                 // 0 在檐口，1 在脊部
     const r = rEave + (rRidge - rEave) * Math.pow(t, 0.72);
     const yy = h * (1 - Math.pow(1 - t, 1.6)) + upturn * Math.pow(1 - t, 3.4);
     pts.push(new THREE.Vector2(Math.max(r, 0.01), yy));
@@ -57,23 +65,19 @@ export function roofProfile(
   return pts;
 }
 
+/** 求半径 r 处的剖面参数 t。注意 rRidge < rEave（屋面向上收窄），故分母为负：
+ *  传入比 rEave **小** 的半径才得到 t>0。传入 rEave+inset 会得到负分数并被钳为 0，
+ *  使 inset 静默失效——该符号错误曾让瓦垄收齐功能完全无效（两张 A/B 图字节相同）。 */
+export function tAtRadius(rEave: number, rRidge: number, r: number): number {
+  const f = (r - rEave) / (rRidge - rEave);
+  return f <= 0 ? 0 : Math.pow(f, 1 / 0.72);
+}
+
 /** 瓦垄：沿屋面剖面铺设的条状脊，间距约 0.9 m。这是侧光下条状高光的来源。 */
 export function tileRidgeGeometry(
   rEave: number, rRidge: number, h: number, upturn: number, spacing = 0.9, inset = 0.6,
 ): THREE.BufferGeometry {
-  // inset 让瓦垄在檐口前收齐，避免盒体厚度越出檐边
-  const tSpan = (() => {
-    const f = (rEave - inset - rEave) / (rRidge - rEave);
-    return f <= 0 ? 0 : Math.pow(f, 1 / 0.72);
-  })();
-  const prof: THREE.Vector2[] = [];
-  const N = 18;
-  for (let i = 0; i <= N; i++) {
-    const t = tSpan + (1 - tSpan) * (i / N);
-    const r = rEave + (rRidge - rEave) * Math.pow(t, 0.72);
-    const yy = h * (1 - Math.pow(1 - t, 1.6)) + upturn * Math.pow(1 - t, 3.4);
-    prof.push(new THREE.Vector2(Math.max(r, 0.01), yy));
-  }
+  const prof = roofProfile(rEave, rRidge, h, upturn, 18, tAtRadius(rEave, rRidge, rEave - inset), 1);
   const count = Math.max(24, Math.round((2 * Math.PI * rEave) / spacing));
   const parts: THREE.BufferGeometry[] = [];
   for (let i = 0; i < count; i++) {
@@ -102,6 +106,8 @@ export interface BuiltScene {
   info: Record<string, unknown>;
   loadEnvironment: () => Promise<EnvInfo>;
   render: (silhouette?: boolean) => void;
+  /** 把相机切到预设机位（交互热键与截图门禁共用同一组机位定义）。 */
+  setCamera: (which: string) => void;
 }
 
 export function buildScene(opts: SceneOptions = {}): BuiltScene {
@@ -163,10 +169,13 @@ export function buildScene(opts: SceneOptions = {}): BuiltScene {
     ? new THREE.MeshStandardMaterial({ map: caihuaTexture(24), roughness: 0.5 })
     : panelRed;
 
-  // ---- terrace：三层，5.2 m，直径 90.3 / 79.3 / 68.2（考据值） ------------------------
+  // ---- terrace：三层，**总高** 5.2 m（考据值）；直径 90.3 / 79.3 / 68.2（考据值） --------
+  // ⚠️ 逐层高度按 5.2 / 3 **均分**，这一步是**构造量**，不是考据值：
+  // 来源只给出总高 5.2 m，没有任何来源给出三层各自的高度
+  // （已对《北京文博》2000 全文与官方页做过检索确认，见 ../.probe/FACTS.md 9.15.4）。
   const terraceD = [...SOURCED.terraceDiameters];       // 下→上
   const tierH = SOURCED.terraceHeight / SOURCED.terraceTiers;
-  const stairLayout = SOURCED.stairwayLayout as readonly { face: string; offset: number }[];
+  const stairLayout = stairwayLayout();
   const bearingOf = (face: string) =>
     face === 'south' ? Math.PI / 2 : face === 'north' ? -Math.PI / 2 : face === 'east' ? 0 : Math.PI;
 
@@ -178,20 +187,21 @@ export function buildScene(opts: SceneOptions = {}): BuiltScene {
     tier.receiveShadow = true; tier.castShadow = true;
     scene.add(tier);
 
-    if (i > 0) {
-      for (const s of stairLayout) {
-        const bearing = bearingOf(s.face);
-        const outward = r + 1.6;
-        const flight = new THREE.Mesh(new THREE.BoxGeometry(4.2, tierH, 3.2), marble);
-        flight.position.set(
-          Math.cos(bearing) * outward - Math.sin(bearing) * s.offset,
-          y + tierH / 2,
-          Math.sin(bearing) * outward + Math.cos(bearing) * s.offset,
-        );
-        flight.rotation.y = -bearing;
-        flight.castShadow = true; flight.receiveShadow = true;
-        scene.add(flight);
-      }
+    // 每一层都有 8 处台阶（「三层坛体各出八陛」）→ 共 24 处。
+    // 早先版本用 `if (i > 0)` 跳过最低层，只建了 16 处（自审发现）。
+    for (const s of stairLayout) {
+      const bearing = bearingOf(s.face);
+      const outward = r + 1.6;
+      const flight = new THREE.Mesh(new THREE.BoxGeometry(4.2, tierH, 3.2), marble);
+      flight.position.set(
+        Math.cos(bearing) * outward - Math.sin(bearing) * s.offset,
+        y + tierH / 2,
+        Math.sin(bearing) * outward + Math.cos(bearing) * s.offset,
+      );
+      flight.rotation.y = -bearing;
+      flight.castShadow = true; flight.receiveShadow = true;
+      flight.userData.formTag = 'stair';
+      scene.add(flight);
     }
     addBalustrade(scene, r - 0.55, y + tierH, marbleBalustrade);
     y += tierH;
@@ -202,6 +212,9 @@ export function buildScene(opts: SceneOptions = {}): BuiltScene {
   let wallIndex = 0;
   // ?fault=gap 把宝顶人为抬离屋面，复现 rev3 的"宝顶悬空"缺陷，用于证明闭合断言真的会失败。
   const finialLift = opts.fault === 'gap' ? 2.0 : 0;
+  // ?fault=ratio 把中檐半径人为改坏（0.86 → 0.60），用于证明 S9 的出挑比量测
+  // 确实测的是渲染结果，而不是在回读常量（同义反复的检查永远不会失败）。
+  const ratioFault = opts.fault === 'ratio';
 
   for (const seg of plan.segments) {
     if (seg.kind === 'wall') {
@@ -240,7 +253,9 @@ export function buildScene(opts: SceneOptions = {}): BuiltScene {
         band.position.y = yy; band.castShadow = true; scene.add(band);
       }
 
-      // 柱：最下两段各 12 根（檐柱 / 金柱），与考据的 4+12+12 对应
+      // 柱：最下两段各 12 根（檐柱 / 金柱）。考据为 4 龙井 + 12 金 + 12 檐 = 28，
+      // 其中 4 根龙井柱在殿内、本模型（外观范围）未建 —— 故实际建 24 根，
+      // 报告里 columnsBuilt 与 SOURCED 的 28 是**两个不同的量**，不可互相替代。
       const cols = SOURCED.columnRings[wallIndex === 0 ? 2 : 1];
       if (wallIndex < 2) {
         for (let i = 0; i < cols; i++) {
@@ -250,12 +265,16 @@ export function buildScene(opts: SceneOptions = {}): BuiltScene {
           );
           col.position.set(Math.cos(a) * r, seg.bottom + seg.height / 2, Math.sin(a) * r);
           col.castShadow = true;
+          col.userData.formTag = 'column';
           scene.add(col);
         }
       }
       wallIndex++;
     } else if (seg.kind === 'eave') {
-      const rEave = seg.eaveRadius!;
+      // fault=ratio 只改渲染几何，不改 massing 的常量：于是"回读常量"的检查仍会通过，
+      // 而"量测渲染"的检查会失败 —— 这正是区分两者是否同义反复的判据。
+      let rEave = seg.eaveRadius!;
+      if (ratioFault && seg.name === 'eave2') rEave = eaveRadii()[2] * 0.60;
       const rRidge = seg.ridgeRadius!;
       const upturn = 0.55;
 
@@ -264,6 +283,7 @@ export function buildScene(opts: SceneOptions = {}): BuiltScene {
       );
       roof.position.y = seg.bottom;
       roof.castShadow = true; roof.receiveShadow = true;
+      roof.userData.formTag = 'eave';
       scene.add(roof);
 
       const rim = new THREE.Mesh(new THREE.TorusGeometry(rEave, 0.46, 12, 128), glazeBlue);
@@ -294,17 +314,17 @@ export function buildScene(opts: SceneOptions = {}): BuiltScene {
       const spireH = fH - lotusH - globeH;
       const lotus = new THREE.Mesh(new THREE.CylinderGeometry(1.35, 1.7, lotusH, 32), gold);
       lotus.position.y = baseY + lotusH / 2;
-      lotus.castShadow = true; scene.add(lotus);
+      lotus.castShadow = true; lotus.userData.formTag = 'finial'; scene.add(lotus);
 
       const globeR = globeH / 2;
       const globe = new THREE.Mesh(new THREE.SphereGeometry(globeR, 48, 32), gold);
       globe.position.y = baseY + lotusH + globeR;
       globe.scale.set(0.82, 1.0, 0.82);
-      globe.castShadow = true; scene.add(globe);
+      globe.castShadow = true; globe.userData.formTag = 'finial'; scene.add(globe);
 
       const spire = new THREE.Mesh(new THREE.ConeGeometry(0.3, spireH, 24), gold);
       spire.position.y = baseY + lotusH + globeH + spireH / 2;
-      spire.castShadow = true; scene.add(spire);
+      spire.castShadow = true; spire.userData.formTag = 'finial'; scene.add(spire);
     }
   }
 
@@ -374,30 +394,65 @@ export function buildScene(opts: SceneOptions = {}): BuiltScene {
   }
 
   // ---- 机器可读报告：供截图门禁断言 ------------------------------------------------------
+  // IMPORTANT: counts are taken from the ASSEMBLED OBJECTS, not echoed from SOURCED.
+  // An earlier version reported `columns: SOURCED.columns`, which meant a regression that
+  // stopped building columns would still pass ("echo, not measure" — caught in review).
   let triangles = 0;
   const materials = new Set<THREE.Material>();
+  let builtColumns = 0;
+  let builtPanels = 0;
+  let builtStairFlights = 0;
+  let builtEaves = 0;
   scene.traverse((o) => {
     const m = o as THREE.Mesh;
-    if (m.isMesh) {
-      const g = m.geometry as THREE.BufferGeometry;
-      triangles += g.index ? g.index.count / 3 : (g.attributes.position?.count ?? 0) / 3;
-      materials.add(m.material as THREE.Material);
-    }
+    if (!m.isMesh) return;
+    triangles += countTriangles(m.geometry as THREE.BufferGeometry);
+    materials.add(m.material as THREE.Material);
+    const tag = m.userData?.formTag as string | undefined;
+    if (tag === 'column') builtColumns++;
+    if (tag === 'balustrade') builtPanels += (m.userData.panels as number) ?? 0;
+    if (tag === 'stair') builtStairFlights++;
+    if (tag === 'eave') builtEaves++;
   });
   const bbox = new THREE.Box3().setFromObject(scene);
-  const r = eaveRadii();
-  // 逐段闭合检查必须建立在实际装配上，而不是照抄 plan 的数学结果 ——
+  // 闭合检查必须建立在实际装配上，而不是照抄 plan 的数学结果 ——
   // 否则 fault=gap（把宝顶抬离屋面）这类构造故障永远不会被发现，门禁就成了摆设。
-  const actualFinialBase = plan.segments[plan.segments.length - 1].bottom + finialLift;
-  const roofApex = plan.segments[plan.segments.length - 2].top;
-  const segmentGap = Math.abs(roofApex - actualFinialBase);
+  // 两端都取自**实际加入场景的物体**：
+  //   roofApexY  = 最高一层檐（lathe 屋面）的包围盒顶
+  //   finialBaseY= 宝顶最下零件的包围盒底
+  // 注意檐锥的几何顶**高于** plan 的推进量（檐高 × overlap），故宝顶底本来就略嵌入屋面，
+  // 这是有意的（宝顶坐落在屋面脊部）。因此判据是"宝顶**不得悬浮在屋面之上**"，
+  // 而不是"两点严格相等"：finialBaseY <= roofApexY + eps。
+  let roofApexY = -Infinity;
+  scene.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (m.isMesh && m.userData?.formTag === 'eave') {
+      const y = new THREE.Box3().setFromObject(m).max.y;
+      if (y > roofApexY) roofApexY = y;
+    }
+  });
+  let finialBaseY = Infinity;
+  scene.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (m.isMesh && m.userData?.formTag === 'finial') {
+      const y = new THREE.Box3().setFromObject(m).min.y;
+      if (y < finialBaseY) finialBaseY = y;
+    }
+  });
+  const bothKnown = Number.isFinite(roofApexY) && Number.isFinite(finialBaseY);
+  // 悬浮量：只统计"宝顶在屋面之上"的那部分间隙；嵌入记 0。
+  const floatGap = bothKnown ? Math.max(0, finialBaseY - roofApexY) : Number.POSITIVE_INFINITY;
   const assertion = {
     totalHeightTarget: SOURCED.totalHeight,
     totalHeightActual: +bbox.max.y.toFixed(3),
     totalHeightOk: Math.abs(bbox.max.y - SOURCED.totalHeight) <= 0.15,
-    // 包围盒只能证明"最高点对"，不能证明"内部无缝隙"（rev3 正是死在这里）
-    segmentGap: +segmentGap.toFixed(4),
-    segmentsClosedOk: segmentGap <= 1e-3,
+    // 包围盒只能证明"最高点对"，不能证明"内部无缝隙"（rev3 正是死在这里）。
+    roofApexY: bothKnown ? +roofApexY.toFixed(3) : null,
+    finialBaseY: bothKnown ? +finialBaseY.toFixed(3) : null,
+    finialFloatGap: +floatGap.toFixed(4),
+    segmentsClosedOk: bothKnown && floatGap <= 1e-3,
+    // 保留该字段名以兼容既有断言脚本；语义等同于 finialFloatGap。
+    segmentGap: +floatGap.toFixed(4),
     envLoadedOk: !useEnv,
   };
 
@@ -405,26 +460,42 @@ export function buildScene(opts: SceneOptions = {}): BuiltScene {
     cam: camName, detail, facadeTextures: facadeOn,
     // 环境强度必须回读，否则"参数被接受但静默无效"无法被发现
     envint: envIntensity,
-    ridgeInset: 0.6,
     triangles: Math.round(triangles),
     drawCalls: renderer.info.render.calls,
     materials: materials.size,
     size: [bbox.max.x - bbox.min.x, bbox.max.y - bbox.min.y, bbox.max.z - bbox.min.z]
       .map((v) => +v.toFixed(2)),
-    // 考据计数（供断言，防静默回归）
+    // 考据值（常量，供"应然"对照）
     columns: SOURCED.columns,
     panelsPerTier: SOURCED.panelsPerTier,
     stairwaysPerTier: SOURCED.stairwaysPerTier,
     eaveTiers: SOURCED.eaveTiers,
-    // 出挑比实测（供与参考读值比对）
-    eaveRatios: [r[0] / r[2], r[1] / r[2], 1].map((v) => +v.toFixed(3)),
+    // 实际建出的构件数（由遍历装配结果得到，不是回读常量）——
+    // 二者分开上报，才能真正发现"少建了"这类回归。
+    built: {
+      columns: builtColumns,
+      panels: builtPanels,
+      stairFlights: builtStairFlights,
+      eaves: builtEaves,
+    },
     counts: assertSourcedCounts(),
     assertions: assertion,
     env: envInfo,
     hasEnvironment: scene.environment !== null,
   };
 
-  return { scene, camera, renderer, info, loadEnvironment, render };
+  function setCamera(which: string) {
+    const c2 = CAMS[which];
+    if (!c2) return;
+    if (camera instanceof THREE.PerspectiveCamera) {
+      camera.position.set(...c2.pos);
+      camera.lookAt(new THREE.Vector3(...c2.look));
+      camera.updateProjectionMatrix();
+    }
+    info.cam = which;
+  }
+
+  return { scene, camera, renderer, info, loadEnvironment, render, setCamera };
 }
 
 /** 汉白玉栏杆：108 栏板/层（《北京文博》2000「各层栏板数均为一百零八块」）。 */
@@ -459,6 +530,8 @@ export function addBalustrade(
   }
   const bal = new THREE.Mesh(mergeGeometries(parts, false)!, mat);
   bal.castShadow = true; bal.receiveShadow = true;
+  bal.userData.formTag = 'balustrade';
+  bal.userData.panels = N;
   scene.add(bal);
   const capMesh = new THREE.Mesh(mergeGeometries(caps, false)!, mat);
   capMesh.castShadow = true;

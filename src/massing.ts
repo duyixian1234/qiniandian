@@ -33,12 +33,6 @@ export const SOURCED = {
   eaveTiers: 3,
   panelsPerTier: 108,                     // 《北京文博》2000：「各层栏板数均为一百零八块」
   stairwaysPerTier: 8,                    // 《北京文博》2000：「三层坛体各出八陛」
-  stairwayLayout: [
-    { face: 'south', offset: -9 }, { face: 'south', offset: 0 }, { face: 'south', offset: 9 },
-    { face: 'north', offset: -9 }, { face: 'north', offset: 0 }, { face: 'north', offset: 9 },
-    { face: 'east', offset: 0 },
-    { face: 'west', offset: 0 },
-  ],
 } as const;
 
 // =======================================================================================
@@ -57,7 +51,32 @@ export const DERIVED = {
   wallRadii: [16.36, 12.20, 8.60] as const,
   // 底檐外缘半径基准
   bottomEaveRadius: 20.6,
+  // 台基台阶的切向偏移（米）。来源只给出「南北两面各三出」的**数量**，
+  // **没有**给出三条台阶之间的间距；0 / ±9 m 是我为了让三条台阶不重叠而选的**构造量**。
+  // 原先它被误放在 SOURCED 里，与该块"每个数字都有一手出处"的声明冲突（自审发现）。
+  stairwayOffsets: [0, -9, 9] as const,
 } as const;
+
+export interface Stairway {
+  face: 'south' | 'north' | 'east' | 'west';
+  /** 切向偏移（米）—— 构造量，见 DERIVED.stairwayOffsets */
+  offset: number;
+}
+
+/**
+ * 每层台基的台阶布置：**数量**是考据值（南北各 3、东西各 1，共 8，出自《北京文博》2000），
+ * 而**切向间距**是构造量（来源未给）。
+ * 二者刻意分开表达，是为了让"哪些是考据、哪些是推导"在代码里就一目了然。
+ */
+export function stairwayLayout(): Stairway[] {
+  const [a, b, c] = DERIVED.stairwayOffsets;
+  return [
+    { face: 'south', offset: a }, { face: 'south', offset: b }, { face: 'south', offset: c },
+    { face: 'north', offset: a }, { face: 'north', offset: b }, { face: 'north', offset: c },
+    { face: 'east', offset: 0 },
+    { face: 'west', offset: 0 },
+  ];
+}
 
 export type SegmentKind = 'wall' | 'eave' | 'finial';
 
@@ -229,17 +248,26 @@ export interface CountCheck {
  */
 export function assertSourcedCounts(override: Partial<Record<string, number>> = {}): CountCheck[] {
   const ringsSum = SOURCED.columnRings.reduce((a, b) => a + b, 0);
+  const layout = stairwayLayout();
   const define: Array<[string, number]> = [
     ['columns', SOURCED.columns],
     ['columnRings', ringsSum],
     ['panelsPerTier', SOURCED.panelsPerTier],
     ['stairwaysPerTier', SOURCED.stairwaysPerTier],
-    ['stairwayLayout', SOURCED.stairwayLayout.length],
+    ['stairwayLayout', layout.length],
+    ['stairwaysSouth', layout.filter((s) => s.face === 'south').length],
+    ['stairwaysNorth', layout.filter((s) => s.face === 'north').length],
     ['eaveTiers', SOURCED.eaveTiers],
     ['terraceTiers', SOURCED.terraceTiers],
   ];
-  return define.map(([name, expected]) => {
-    const actual = override[name] ?? expected;
+  // 期望值写死为字面量，而不是从 SOURCED 现算 —— 否则检查会与实现同源，永远不可能失败。
+  const expectedLiteral: Record<string, number> = {
+    columns: 28, columnRings: 28, panelsPerTier: 108, stairwaysPerTier: 8,
+    stairwayLayout: 8, stairwaysSouth: 3, stairwaysNorth: 3, eaveTiers: 3, terraceTiers: 3,
+  };
+  return define.map(([name]) => {
+    const expected = expectedLiteral[name];
+    const actual = override[name] ?? define.find((d) => d[0] === name)![1];
     return { name, expected, actual, ok: actual === expected };
   });
 }

@@ -32,7 +32,8 @@ $Root = $PSScriptRoot
 $LogDir = Join-Path $Root 'logs'
 $ShotRoot = Join-Path $Root 'shots'
 $Hdri = Join-Path $Root 'public\hdri\kloofendal_43d_clear_puresky_2k.hdr'
-$RefRatio = @(0.64, 0.86, 1.00)   # 人工读图（构造量），见 SPEC.md
+# 参考读值容差（绝对差）。参考值本身由 scripts/measure-eave-ratios.mjs 内以字面量给出，
+# 并在 S9b 用注入几何故障证明该量测真的会失败 —— 故这里不再重复一份 $RefRatio（曾为死变量）。
 $RatioTol = 0.05
 
 New-Item -ItemType Directory -Force -Path $LogDir, $ShotRoot | Out-Null
@@ -90,6 +91,9 @@ $pre | ForEach-Object { Say $_ }
 Record 'S0-precheck' $ok0 "node=$nodeV pnpm=$pnpmV"
 
 # ============================================================ S1 install
+# -SkipInstall 时 S1 必须**记为显式跳过**，而不是"不记录"。
+# 早先的写法在 -SkipInstall 下少记录一步，使 $total 恰好等于守卫下限，
+# 于是"不得有静默跳过"这条承诺被自己破坏了（自审发现）。
 if (-not $SkipInstall) {
     Say "`n===== S1 pnpm install ====="
     Push-Location $Root
@@ -97,6 +101,9 @@ if (-not $SkipInstall) {
     Pop-Location
     $ok = Test-Path (Join-Path $Root 'node_modules\vite\bin\vite.js')
     Record 'S1-install' $ok "vite bin present=$ok ($($r.Ms) ms)"
+} else {
+    Say "`n===== S1 pnpm install（-SkipInstall，显式跳过）====="
+    Record 'S1-install' $true 'EXPLICIT-SKIP: -SkipInstall requested by the caller'
 }
 
 # ============================================================ S2 typecheck
@@ -154,10 +161,11 @@ $Base = "http://127.0.0.1:$Port/"
 
 # 服务未起来时，后续步骤必须显式记 FAIL —— 绝不静默跳过（否则脚本会"绿色退出"但没做检查）
 if (-not $ServerUp) {
-    foreach ($n in 'S6-gate', 'S7-selftest', 'S8-paramguard', 'S9-ratios', 'S10-determinism') {
+    foreach ($n in 'S6-gate', 'S7-selftest', 'S8-paramguard', 'S9-ratios', 'S9b-ratio-selftest',
+                    'S11-glaze', 'S10-determinism') {
         Record $n $false 'skipped: preview server did not start'
     }
-    Say "`n[!] 预览服务未启动，S6–S10 全部记为 FAIL（不静默跳过）"
+    Say "`n[!] 预览服务未启动，S6–S11 全部记为 FAIL（不静默跳过）"
 }
 
 # ============================================================ S6 截图门禁
@@ -248,15 +256,78 @@ if ($ServerUp) {
         $measured = $null
         try { $measured = ($m.Text | ConvertFrom-Json) } catch { $measured = $null }
         if ($measured -and $measured.ok) {
-            $ok = [double]$measured.worst -le $RatioTol
-            Record 'S9-ratios' $ok ("measured=" + ($measured.ratios -join ':') +
-                " ref=" + ($measured.reference -join ':') +
-                " worst=$($measured.worst) tol=$RatioTol (from rendered silhouette)")
+            # 参考值由 measure-eave-ratios.mjs 以字面量给出；这里**再独立核对一次**，
+            # 防止参考值本身被改动后不被发现（曾发现 $RefRatio 为死变量，参考值可静默漂移）。
+            $expectRef = @(0.64, 0.86, 1.0)
+            $refOk = ($measured.reference.Count -eq 3) -and
+                     (@(0..2 | Where-Object { [Math]::Abs([double]$measured.reference[$_] - $expectRef[$_]) -gt 1e-9 }).Count -eq 0)
+            if (-not $refOk) {
+                Record 'S9-ratios' $false ("reference drifted: got [" + ($measured.reference -join ':') + "] expected [" + ($expectRef -join ':') + "]")
+            } else {
+                $ok = [double]$measured.worst -le $RatioTol
+                Record 'S9-ratios' $ok ("measured=" + ($measured.ratios -join ':') +
+                    " ref=" + ($measured.reference -join ':') +
+                    " worst=$($measured.worst) tol=$RatioTol (from rendered silhouette)")
+            }
         } else {
             Record 'S9-ratios' $false ("measurement failed: " + $(if ($measured) { $measured.reason } else { 'unparsable output' }))
         }
     } else {
         Record 'S9-ratios' $false 'silhouette render produced no PNG'
+    }
+
+    # S9b：证明 S9 **不是同义反复**。fault=ratio 只改渲染几何、不改 massing 常量，
+    # 因此"回读常量"式的检查仍会通过，而"量测渲染"式的检查必须失败。
+    # 若注入故障后仍 PASS，说明 S9 在自欺，必须视为失败。
+    Say "`n----- S9b 出挑比量测自证（注入几何故障必须被发现）-----"
+    $silFault = Join-Path $ShotRoot 'silhouette-fault'
+    Remove-Item $silFault -Recurse -Force -ErrorAction SilentlyContinue
+    Push-Location $Root
+    $null = Logged 'S9b-render' {
+        & node (Join-Path $Root 'scripts\capture.mjs') $Base $silFault 1280 720 `
+            'elev:2:ratio|silhouette=1,projection=ortho' --assert
+    }
+    Pop-Location
+    $ff = Get-ChildItem $silFault -Filter *.png -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($ff) {
+        $mf = Logged 'S9b-measure' { & node (Join-Path $Root 'scripts\measure-eave-ratios.mjs') $ff.FullName }
+        $fm = $null
+        try { $fm = ($mf.Text | ConvertFrom-Json) } catch { $fm = $null }
+        $bit = ($fm -and $fm.ok -and [double]$fm.worst -gt $RatioTol)
+        Record 'S9b-ratio-selftest' $bit ("injected worst=" + $(if ($fm) { $fm.worst } else { 'n/a' }) +
+            " > tol=$RatioTol => $bit (proves the ratio check measures rendered geometry)")
+    } else {
+        Record 'S9b-ratio-selftest' $false 'faulted silhouette produced no PNG'
+    }
+}
+
+# ============================================================ S11 蓝釉色 vs 故宫基准
+if ($ServerUp) {
+    Say "`n===== S11 蓝釉 Lab vs 故宫实测容差（量测渲染像素）====="
+    # §4.7：必须从**渲染像素**量测，不能回读材质常量（那样永远相等）。
+    # 基准：故宫博物院 天坛蓝釉标准样品 Lab(28.26, 5.87, −18.99)，
+    #       容差 L*[24,34] a*[1.87,8.77] b*[−25.36,−12.71]
+    $glDir = Join-Path $ShotRoot 'glaze'
+    Remove-Item $glDir -Recurse -Force -ErrorAction SilentlyContinue
+    Push-Location $Root
+    $null = Logged 'S11-render' {
+        & node (Join-Path $Root 'scripts\capture.mjs') $Base $glDir 1280 720 'hero:2' --assert
+    }
+    Pop-Location
+    $gf = Get-ChildItem $glDir -Filter *.png -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($gf) {
+        $gm = Logged 'S11-measure' { & node (Join-Path $Root 'scripts\measure-glaze.mjs') $gf.FullName }
+        $gj = $null
+        try { $gj = ($gm.Text | ConvertFrom-Json) } catch { $gj = $null }
+        if ($gj -and $gj.ok) {
+            Record 'S11-glaze' ([bool]$gj.allInTolerance) (
+                "Lab=($($gj.meanLab -join ', ')) palace=(28.26, 5.87, -18.99) " +
+                "dE=$($gj.deltaE) inTol=$($gj.allInTolerance) pixels=$($gj.glazePixels)")
+        } else {
+            Record 'S11-glaze' $false ("measurement failed: " + $(if ($gj) { $gj.reason } else { 'unparsable' }))
+        }
+    } else {
+        Record 'S11-glaze' $false 'glaze render produced no PNG'
     }
 }
 
@@ -295,20 +366,25 @@ Say "  清理 playwright 探针浏览器：$($stray.Count) 个"
 
 $pass = @($Results | Where-Object { $_.Ok }).Count
 $total = @($Results).Count
+# "静默跳过"= 因依赖未满足而没跑（Detail 以 'skipped:' 开头）。
+# 调用方**显式要求**跳过（-SkipInstall）记为 EXPLICIT-SKIP 且计 PASS，两者不同。
 $skipped = @($Results | Where-Object { -not $_.Ok -and $_.Detail -like 'skipped:*' }).Count
+$explicitSkips = @($Results | Where-Object { $_.Detail -like 'EXPLICIT-SKIP:*' }).Count
 $lines = [System.Collections.Generic.List[string]]::new()
 $lines.Add("祈年殿 run.ps1 汇总  $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
 $lines.Add("node=$nodeV pnpm=$pnpmV")
 $lines.Add('')
 foreach ($r in $Results) {
-    $lines.Add(("{0} {1,-16} {2}" -f $(if ($r.Ok) { 'PASS' } else { 'FAIL' }), $r.Step, $r.Detail))
+    $lines.Add(("{0} {1,-20} {2}" -f $(if ($r.Ok) { 'PASS' } else { 'FAIL' }), $r.Step, $r.Detail))
 }
 $lines.Add('')
-$lines.Add("TOTAL $pass/$total PASS  (skipped=$skipped)")
-# 覆盖率守卫：步骤齐备且无静默跳过，防止"绿色但没跑关键检查"的假阳性
-$guard = ($total -ge 10 -and $skipped -eq 0)
-if ($total -lt 10) { $lines.Add("GUARD FAIL: only $total steps recorded, expected >= 10") }
-if ($skipped -gt 0) { $lines.Add("GUARD FAIL: $skipped step(s) were skipped") }
+$lines.Add("TOTAL $pass/$total PASS  (silentSkips=$skipped explicitSkips=$explicitSkips)")
+# 覆盖率守卫：步骤齐备且无**静默**跳过，防止"绿色但没跑关键检查"的假阳性。
+# 下限 12 = S0..S11（含 S9b），使"少记录一步"这类问题无法再绕开守卫。
+$expectedSteps = 12
+$guard = ($total -ge $expectedSteps -and $skipped -eq 0)
+if ($total -lt $expectedSteps) { $lines.Add("GUARD FAIL: only $total steps recorded, expected >= $expectedSteps") }
+if ($skipped -gt 0) { $lines.Add("GUARD FAIL: $skipped step(s) were silently skipped") }
 ($lines -join "`n") | Out-File (Join-Path $LogDir 'SUMMARY.log') -Encoding utf8
 
 Say "`n===== 汇总 ====="
