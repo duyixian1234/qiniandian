@@ -11,6 +11,11 @@ shots/
 .green.log
 .capture.log
 .install.log
+# playwright-cli（agent CLI）在**当前工作目录**写下的会话产物
+.playwright-cli/
+# playwright 测试产物
+test-results/
+playwright-report/
 # 任意由本地预览服务生成的临时输出（.pN.out/.pN.err 等）
 .p*.out
 .p*.err
