@@ -5,11 +5,12 @@
   "type": "module",
   "description": "天坛祈年殿 three.js 重建 —— 形制考据准确、渲染写实、运行时离线自包含",
   "scripts": {
+    "dev": "vite",
+    "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "build": "tsc --noEmit && vite build",
-    "preview": "vite preview --port 5390 --strictPort --host 127.0.0.1"
+    "build": "tsc --noEmit && vite build"
   },
   "dependencies": {
     "three": "0.186.1"
