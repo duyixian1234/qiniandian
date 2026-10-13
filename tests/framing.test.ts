@@ -3,6 +3,7 @@ import {
   FRAMING,
   cameraDistanceForViewport,
   framingFractions,
+  framingReport,
   visibleWidthAt,
   type Viewport,
 } from '../src/framing.js';
@@ -161,8 +162,14 @@ describe('framingFractions — reported metrics used by the layout gate', () => 
   });
 
   it('reports the mode it actually used, so the gate can assert on it', () => {
-    expect(framingFractions({ width: 1280, height: 720 }, cameraDistanceForViewport({ width: 1280, height: 720 })).mode).toBe('contain');
-    expect(framingFractions({ width: 390, height: 844 }, cameraDistanceForViewport({ width: 390, height: 844 })).mode).toBe('close-until-floor');
+    const wide: Viewport = { width: 1280, height: 720 };
+    expect(framingFractions(wide, cameraDistanceForViewport(wide)).mode).toBe('contain');
+    // 390x844 的 A=0.462 > A*(0.4392)，故是"为达标而靠近"，宽度下限尚未触顶
+    const tall: Viewport = { width: 390, height: 844 };
+    expect(framingFractions(tall, cameraDistanceForViewport(tall)).mode).toBe('close-until-fh');
+    // 360x844 的 A=0.4265 < A*，宽度下限先触顶 ⇒ 模式不同
+    const narrow: Viewport = { width: 360, height: 844 };
+    expect(framingFractions(narrow, cameraDistanceForViewport(narrow)).mode).toBe('close-until-floor');
   });
 
   it('may let the terrace overflow in portrait, but the HALL BODY must always fit', () => {
@@ -182,6 +189,59 @@ describe('framingFractions — reported metrics used by the layout gate', () => 
     const portrait = { width: 390, height: 844 } as Viewport;
     const fp = framingFractions(portrait, cameraDistanceForViewport(portrait));
     expect(fp.widthFraction).toBeGreaterThan(1);
-    expect(fp.mode).toBe('close-until-floor');
+    expect(fp.mode).toBe('close-until-fh');   // A=0.462 > A*，高度目标可达成
+  });
+});
+
+describe('framingReport — 区分"硬违规"与"边界内警告"', () => {
+  it('reports no violations for the agreed viewport set', () => {
+    const set: Viewport[] = [
+      { width: 1280, height: 720 }, { width: 1920, height: 1080 }, { width: 2560, height: 1080 },
+      { width: 3440, height: 1440 }, { width: 1024, height: 768 }, { width: 844, height: 390 },
+      { width: 390, height: 844 }, { width: 360, height: 780 },
+    ];
+    for (const vp of set) {
+      const r = framingReport(vp, cameraDistanceForViewport(vp));
+      expect(r.violations, `${vp.width}x${vp.height}`).toEqual([]);
+      expect(r.warnings, `${vp.width}x${vp.height}`).toEqual([]);
+      expect(r.heightTargetAchievable, `${vp.width}x${vp.height}`).toBe(true);
+    }
+  });
+
+  it('derives the critical aspect A* = 35.92 * 0.45 / 36.8 ≈ 0.4392', () => {
+    // 手算的独立期望值
+    expect(FRAMING.minAspectForBothConstraints).toBeCloseTo(0.4392, 4);
+    expect(FRAMING.minAspectForBothConstraints).toBeCloseTo(
+      (FRAMING.minVisibleWidth * FRAMING.minHeightFraction) / FRAMING.buildingHeight, 9,
+    );
+  });
+
+  it('BELOW A* it warns instead of failing, and still never crops the hall body', () => {
+    // 360x844（A=0.4265 < A*）：45% 在数学上不可达。
+    // 规则应优先保住可见宽度下限，报告应给 warning 而非 violation。
+    const narrow: Viewport = { width: 360, height: 844 };
+    const d = cameraDistanceForViewport(narrow);
+    const r = framingReport(narrow, d);
+    expect(r.aspect).toBeLessThan(FRAMING.minAspectForBothConstraints);
+    expect(r.heightTargetAchievable).toBe(false);
+    expect(r.violations).toEqual([]);            // 不是失败
+    expect(r.warnings.length).toBe(1);           // 但要如实报告
+    // 且硬底线仍守住
+    const f = framingFractions(narrow, d);
+    expect(f.visibleWidth).toBeGreaterThanOrEqual(FRAMING.hallBodyWidth - 1e-9);
+  });
+
+  it('a real crop of the hall body IS a violation regardless of aspect', () => {
+    // 故意把相机放得太近：可见宽度装不下大殿本体 ⇒ 必须报违规（证明该检查会失败）
+    const vp: Viewport = { width: 390, height: 844 };
+    const tooClose = 30;   // 远小于规则距离 ~106
+    const r = framingReport(vp, tooClose);
+    expect(r.violations.length).toBeGreaterThan(0);
+    expect(r.violations.join(' ')).toMatch(/crops the hall body/);
+  });
+
+  it('rejects a degenerate distance', () => {
+    const r = framingReport({ width: 1280, height: 720 }, Number.POSITIVE_INFINITY);
+    expect(r.violations.join(' ')).toMatch(/not a positive finite number/);
   });
 });

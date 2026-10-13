@@ -13,7 +13,7 @@
 
 import {
   FOV_Y_DEG, BUILDING_WIDTH, BUILDING_HEIGHT, HALL_BODY_WIDTH,
-  WIDTH_MARGIN, MIN_VISIBLE_WIDTH, MIN_HEIGHT_FRACTION,
+  WIDTH_MARGIN, MIN_VISIBLE_WIDTH, MIN_HEIGHT_FRACTION, MIN_ASPECT_FOR_BOTH_CONSTRAINTS,
 } from './framingConst.js';
 
 /** 取景参数。宽高取自**建筑本体**，不是场景包围盒（后者含半径 400 m 的地面圆盘）。 */
@@ -32,6 +32,8 @@ export const FRAMING = {
   minVisibleWidth: MIN_VISIBLE_WIDTH,
   /** 建筑占屏高的目标下限 */
   minHeightFraction: MIN_HEIGHT_FRACTION,
+  /** 两条约束可同时满足所需的最小宽高比（≈0.4392）。低于它 45% 在数学上不可达。 */
+  minAspectForBothConstraints: MIN_ASPECT_FOR_BOTH_CONSTRAINTS,
 } as const;
 
 export interface Viewport { width: number; height: number }
@@ -46,7 +48,12 @@ export interface FramingOverrides {
   minVisibleWidth?: number;
 }
 
-export type FramingMode = 'contain' | 'close-until-floor';
+export type FramingMode =
+  | 'contain'             // 整座台基可见（宽度或高度任一约束主导，两者都装得下）
+  | 'close-until-fh'      // 为把占屏高拉到达标而靠近（宽度下限尚未触顶）
+  | 'close-until-floor'   // 已靠近到可见宽度下限，占屏高因此未达标（窄机的内在边界）
+  | 'preset-exempt'       // 该机位豁免取景规则（top：平面图）
+  | 'ortho-fixed';        // 正交量测机位：半宽固定
 
 export interface FramingResult {
   /** 相机到注视点的距离（米） */
@@ -116,37 +123,70 @@ export function framingFractions(
   const tanX = tanY * aspect;
   const contentW = over.buildingWidth ?? FRAMING.buildingWidth;
   const contentH = over.buildingHeight ?? FRAMING.buildingHeight;
+  const minVisible = over.minVisibleWidth ?? FRAMING.minVisibleWidth;
   const visibleWidth = 2 * distance * tanX;
   const visibleHeight = 2 * distance * tanY;
   const heightFraction = contentH / visibleHeight;
   const widthFraction = contentW / visibleWidth;
-  // 宽度约束主导 => contain（整座台基可见）；否则说明是靠"靠近"把高度拉到达标
-  const halfW = contentW / 2;
-  const halfH = contentH / 2;
-  const dContain = Math.max(halfW / tanX, halfH / tanY);
-  const mode: FramingMode = Math.abs(distance - dContain) < 1e-6 ? 'contain' : 'close-until-floor';
+
+  // 判定该距离落在哪个分支上（与 cameraDistanceForViewport 的决策同源）：
+  //   contain 距离 → 'contain'；否则看是"高度目标"还是"宽度下限"占主导
+  const dContain = Math.max((contentW / 2) / tanX, (contentH / 2) / tanY);
+  let mode: FramingMode;
+  if (Math.abs(distance - dContain) < 1e-6) {
+    mode = 'contain';
+  } else {
+    const dForTargetHeight = (contentH / 2) / (tanY * FRAMING.minHeightFraction);
+    const dForWidthFloor = minVisible / (2 * tanX);
+    // 取较远者：两者相等时宽度下限恰好触顶
+    mode = dForWidthFloor > dForTargetHeight + 1e-6 ? 'close-until-floor' : 'close-until-fh';
+  }
   return { distance, mode, heightFraction, widthFraction, visibleWidth };
 }
 
 /**
  * 把 Q30 的两条约束写成可判定的谓词，供测试与门禁共用（避免两处阈值漂移）。
- * @returns 未通过的项（空数组 = 全部通过）
+ *
+ * **重要**：当视口宽高比低于 A*（≈0.4392）时，45% 占屏高与"不切主体"在数学上不可兼得，
+ * 规则会优先保宽度下限（即保主体）。此时本函数**只检查硬底线（不切主体）**，
+ * 并如实报告 45% 未达标 —— 不会把"规则的内在边界"误报成失败。
+ *
+ * @returns 违规项（空数组 = 通过）。`warnings` 里放"未达标但可解释"的项。
  */
-export function framingViolations(vp: Viewport, distance: number): string[] {
+export function framingReport(vp: Viewport, distance: number): {
+  violations: string[];
+  warnings: string[];
+  aspect: number;
+  heightTargetAchievable: boolean;
+} {
   const f = framingFractions(vp, distance);
-  const out: string[] = [];
+  const aspect = vp.width / vp.height;
   const label = `${vp.width}x${vp.height}`;
-  if (f.heightFraction < FRAMING.minHeightFraction - 1e-9) {
-    out.push(`${label}: height fill ${(f.heightFraction * 100).toFixed(1)}% < ${(FRAMING.minHeightFraction * 100).toFixed(0)}%`);
-  }
-  if (f.visibleWidth < FRAMING.minVisibleWidth - 1e-9) {
-    out.push(`${label}: visible width ${f.visibleWidth.toFixed(2)} m < floor ${FRAMING.minVisibleWidth.toFixed(2)} m`);
-  }
+  const violations: string[] = [];
+  const warnings: string[] = [];
+
+  // 硬底线：**永不允许**切掉大殿本体
   if (f.visibleWidth < FRAMING.hallBodyWidth - 1e-9) {
-    out.push(`${label}: visible width ${f.visibleWidth.toFixed(2)} m crops the hall body (${FRAMING.hallBodyWidth} m)`);
+    violations.push(`${label}: visible width ${f.visibleWidth.toFixed(2)} m crops the hall body (${FRAMING.hallBodyWidth} m)`);
   }
   if (!Number.isFinite(distance) || distance <= 0) {
-    out.push(`${label}: distance ${distance} is not a positive finite number`);
+    violations.push(`${label}: distance ${distance} is not a positive finite number`);
   }
-  return out;
+
+  // 软目标：占屏高 ≥45%。窄机（A < A*）下不可达，故只在可达时才算违规。
+  const achievable = aspect >= FRAMING.minAspectForBothConstraints - 1e-9;
+  if (f.heightFraction < FRAMING.minHeightFraction - 1e-9) {
+    const msg = `${label}: height fill ${(f.heightFraction * 100).toFixed(1)}% < ${(FRAMING.minHeightFraction * 100).toFixed(0)}%`;
+    if (achievable) violations.push(msg);
+    else warnings.push(`${msg} — 宽高比 ${aspect.toFixed(3)} < A* ${FRAMING.minAspectForBothConstraints.toFixed(3)}，45% 在数学上不可达；规则已优先保住可见宽度下限`);
+  }
+  if (f.visibleWidth < FRAMING.minVisibleWidth - 1e-9) {
+    violations.push(`${label}: visible width ${f.visibleWidth.toFixed(2)} m < floor ${FRAMING.minVisibleWidth.toFixed(2)} m`);
+  }
+  return { violations, warnings, aspect, heightTargetAchievable: achievable };
+}
+
+/** @deprecated 用 framingReport 以区分"硬违规"与"边界内警告"。保留以兼容既有调用。 */
+export function framingViolations(vp: Viewport, distance: number): string[] {
+  return framingReport(vp, distance).violations;
 }
