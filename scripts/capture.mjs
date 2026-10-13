@@ -42,7 +42,16 @@ try {
     // token: "cam[:detail][:fault]|key=value,key=value"
     const [spec, extra = ''] = token.split('|');
     const [cam, detailPart = '2', fault = ''] = spec.split(':');
-    const q = new URLSearchParams({ cam, detail: detailPart, w: String(width), h: String(height) });
+    // 门禁一律：固定尺寸（w/h）+ 不创建相机控件 + 隐藏 HUD。
+    // 三者都是**截图基线可复现**的前提：
+    //   - w/h 让画布尺寸与运行者窗口无关
+    //   - controls=0 让相机不因控件构造而被 lookAt(target) 改写（OrbitControls 构造函数
+    //     自己会 update() 一次，且 update() 无 enabled 检查，故"根本别构造"才是可靠做法）
+    //   - hud=0 让左上角那行 ~1100 字符的 JSON 不进入画面（它会污染剪影量测）
+    const q = new URLSearchParams({
+      cam, detail: detailPart, w: String(width), h: String(height),
+      controls: '0', hud: '0',
+    });
 
     // 可选 "expect=param~value;param~value"：声明必须被页面自报的参数值。
     // 用途是抓"参数被接受但静默无效"——这类 bug 不报错、不变更，只有回读才能发现。
@@ -76,7 +85,11 @@ try {
     const scene = await page.evaluate(() => window.__SCENE__);
 
     const path = join(outDir, `${tag}-${width}x${height}.png`);
-    await page.screenshot({ path, animations: 'disabled' });
+    // **canvas-only** 截图，而不是整页截图。
+    // 理由不是洁癖：S9/S9b 从剪影图里做宽度峰值检测以量测三角形出挑比，
+    // 任何 DOM 浮层（HUD、控件面板、ViewHelper）都会伪造出假峰值，让那条断言失效。
+    // 用 locator('canvas') 让形制量测与 UI 彻底解耦。
+    await page.locator('canvas').screenshot({ path, animations: 'disabled' });
 
     const checks = [];
     const a = scene?.assertions ?? {};
@@ -98,6 +111,19 @@ try {
     checks.push(['builtStairFlightsIs24', scene?.built?.stairFlights === 24]); // 8 处 × 3 层
     checks.push(['builtEavesIs3', scene?.built?.eaves === 3]);
     if (envRequested) checks.push(['envLoadedOk', a.envLoadedOk === true]);
+    // 门禁基线前置条件：必须确认"不创建控件"与"隐藏 HUD"**真的生效**，
+    // 而不是被接受后静默无效（本项目已踩过一次这类 bug）。
+    checks.push(['controlsDisabled', scene?.controls === false]);
+    checks.push(['hudHidden', scene?.hudVisible === false]);
+    checks.push(['hudElementAbsent', await page.evaluate(() => {
+      const el = document.getElementById('sceneinfo');
+      return el === null || el.hidden === true;
+    })]);
+    checks.push(['canvasFillsViewport', await page.evaluate(() => {
+      const c = document.querySelector('canvas');
+      const r = c.getBoundingClientRect();
+      return Math.abs(r.width - innerWidth) <= 1 && Math.abs(r.height - innerHeight) <= 1;
+    })]);
     // 忽略浏览器隐式的 /favicon.ico 探测：它缺失不是场景缺陷
     const realFailures = failedResponses.filter((s) => !/\/favicon\.ico$/.test(s));
     checks.push(['noPageErrors', consoleErrors.filter((s) => s.startsWith('pageerror:')).length === 0]);

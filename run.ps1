@@ -165,10 +165,10 @@ $Base = "http://127.0.0.1:$Port/"
 # 服务未起来时，后续步骤必须显式记 FAIL —— 绝不静默跳过（否则脚本会"绿色退出"但没做检查）
 if (-not $ServerUp) {
     foreach ($n in 'S6-gate', 'S7-selftest', 'S8-paramguard', 'S9-ratios', 'S9b-ratio-selftest',
-                    'S11-glaze', 'S12-offline', 'S10-determinism') {
+                    'S11-glaze', 'S12-offline', 'S13-layout', 'S14-touch', 'S10-determinism') {
         Record $n $false 'skipped: preview server did not start'
     }
-    Say "`n[!] 预览服务未启动，S6–S12 全部记为 FAIL（不静默跳过）"
+    Say "`n[!] 预览服务未启动，S6–S14 全部记为 FAIL（不静默跳过）"
 }
 
 # ============================================================ S6 截图门禁
@@ -360,6 +360,65 @@ if ($ServerUp) {
         "pageErrors=$(if ($ojOk) { $oj.pageErrors.Count } else { '?' })")
 }
 
+# ============================================================ S13 响应式布局
+if ($ServerUp) {
+    Say "`n===== S13 响应式布局（3 视口 × 两条 Q30 约束）====="
+    # 断言的是渲染出来的真实 DOM/相机数值，不是回读源码常量。
+    # 两个模式都跑：viewport（人看，无 w/h）与 fixed（门禁，w/h 钉死尺寸）。
+    $okAll = $true
+    $det = [System.Collections.Generic.List[string]]::new()
+    foreach ($mode in @('viewport', 'fixed')) {
+        Push-Location $Root
+        if ($mode -eq 'fixed') {
+            $r = Logged "S13-layout-$mode" { & node (Join-Path $Root 'scripts\verify-layout.mjs') $Base '--fixed' }
+        } else {
+            $r = Logged "S13-layout-$mode" { & node (Join-Path $Root 'scripts\verify-layout.mjs') $Base }
+        }
+        Pop-Location
+        $j = $null; $parsed = $false
+        $m = [regex]::Match($r.Text, '\{.*\}', 'Singleline')
+        if ($m.Success) { try { $j = $m.Value | ConvertFrom-Json; $parsed = $true } catch { $parsed = $false } }
+        if (-not $parsed) { $okAll = $false; $det.Add("  $mode : output unparsable (exit=$($r.Exit))"); continue }
+        if ($r.Exit -ne 0) { $okAll = $false }
+        foreach ($res in $j.results) {
+            $fr = $res.framing
+            $det.Add(("  {0,-8} {1,-22} rect={2}x{3} pxRatio={4} hf={5} vw={6} {7}" -f `
+                $mode, $res.viewport, [math]::Round($res.rect.w), [math]::Round($res.rect.h), `
+                $res.pixelRatio, $fr.heightFraction, $fr.visibleWidth, $fr.mode))
+        }
+        if ($j.failures.Count) { $det.Add("  $mode FAILURES: " + ($j.failures -join '; ')) }
+    }
+    $det | ForEach-Object { Say $_ }
+    ($det -join "`n") | Out-File (Join-Path $LogDir 'S13-layout.log') -Encoding utf8
+    Record 'S13-layout' $okAll 'canvas fills viewport; Q30 framing holds in 3 viewports x 2 modes'
+}
+
+# ============================================================ S14 移动端基线 + 触摸
+if ($ServerUp) {
+    Say "`n===== S14 移动端基线（竖屏触摸手势）====="
+    Push-Location $Root
+    $r = Logged 'S14-touch' { & node (Join-Path $Root 'scripts\verify-touch.mjs') $Base }
+    Pop-Location
+    $tj = $null; $tParsed = $false
+    $m2 = [regex]::Match($r.Text, '\{.*\}', 'Singleline')
+    if ($m2.Success) { try { $tj = $m2.Value | ConvertFrom-Json; $tParsed = $true } catch { $tParsed = $false } }
+    $touchOk = ($r.Exit -eq 0) -and $tParsed
+    $det2 = [System.Collections.Generic.List[string]]::new()
+    if ($tParsed) {
+        foreach ($c in $tj.results) {
+            $extra = ''
+            if ($null -ne $c.dPos) { $extra += " dPos=$($c.dPos)" }
+            if ($null -ne $c.dDistAway) { $extra += " dAway=$($c.dDistAway) dTogether=$($c.dDistTogether)" }
+            if ($null -ne $c.touchAction) { $extra += " touchAction=$($c.touchAction)" }
+            $det2.Add(("  {0,-46} ok={1}{2}" -f $c.check, $c.ok, $extra))
+        }
+        if ($tj.failures.Count) { $det2.Add("  FAILURES: " + ($tj.failures -join '; ')) }
+    } else { $det2.Add("  output unparsable (exit=$($r.Exit))") }
+    $det2 | ForEach-Object { Say $_ }
+    ($det2 -join "`n") | Out-File (Join-Path $LogDir 'S14-touch.log') -Encoding utf8
+    Record 'S14-touch' $touchOk 'drag rotates, pinch dollies reversibly, disabled control stays put'
+}
+
 # ============================================================ S10 确定性
 if ($ServerUp) {
     Say "`n===== S10 确定性（连跑两次截图必须字节一致）====="
@@ -409,8 +468,8 @@ foreach ($r in $Results) {
 $lines.Add('')
 $lines.Add("TOTAL $pass/$total PASS  (silentSkips=$skipped explicitSkips=$explicitSkips)")
 # 覆盖率守卫：步骤齐备且无**静默**跳过，防止"绿色但没跑关键检查"的假阳性。
-# 下限 14 = S0..S12（含 S9b、S11、S12），使"少记录一步"这类问题无法再绕开守卫。
-$expectedSteps = 14
+# 下限 16 = S0..S14（含 S9b、S11、S12、S13、S14），使"少记录一步"这类问题无法绕开守卫。
+$expectedSteps = 16
 $guard = ($total -ge $expectedSteps -and $skipped -eq 0)
 if ($total -lt $expectedSteps) { $lines.Add("GUARD FAIL: only $total steps recorded, expected >= $expectedSteps") }
 if ($skipped -gt 0) { $lines.Add("GUARD FAIL: $skipped step(s) were silently skipped") }

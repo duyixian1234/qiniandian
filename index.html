@@ -2,15 +2,68 @@
 <html lang="zh">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- viewport-fit=cover 让画布铺到刘海/圆角区域，配合下方 env(safe-area-inset-*) 给浮层留边 -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>祈年殿 — 天坛祈年殿 three.js 重建</title>
   <!-- 提供 favicon 可消除浏览器对 /favicon.ico 的隐式 404 探测。
        截图门禁已显式忽略该探测，但它会让 playwright-cli 的人工评审每次都显示
        "Console: 1 errors"，容易被误读为页面故障，故补上。 -->
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <style>
-    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #000; }
-    canvas { display: block; }
+    html, body {
+      margin: 0; padding: 0; height: 100%; overflow: hidden; background: #000;
+      /* 全屏 3D 画布页面不应被原生手势滚动或触发"后退"导航 */
+      overscroll-behavior: none;
+    }
+    /* 画布铺满视口。
+       touch-action:none **必须在这里设**，不能依赖 OrbitControls 代设 ——
+       实测（探针 .qiniandian-touch/REPORT.md）：不创建控件时 canvas 的 touch-action
+       为 auto，移动端触摸会被浏览器当作原生手势处理，直接把页面导航走
+       （href -> about:blank、100% 白屏）。这会让"触摸不应改变画面"这类断言
+       在测一张空白页，从而假通过。 */
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      touch-action: none;
+    }
+    /* ---- 控件面板：宽屏常驻、窄屏折叠为小按钮 ---- */
+    #panel {
+      position: fixed;
+      z-index: 10;
+      left: max(8px, env(safe-area-inset-left));
+      top: max(8px, env(safe-area-inset-top));
+      color: #eaeaea;
+      font: 12px/1.5 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
+      user-select: none;
+    }
+    #panel-toggle {
+      background: #000000a6; color: #eaeaea; border: 1px solid #ffffff26;
+      border-radius: 6px; padding: 5px 10px; font: inherit; cursor: pointer;
+    }
+    #panel-body {
+      margin-top: 6px; padding: 8px; border-radius: 8px;
+      background: #000000b3; border: 1px solid #ffffff1f;
+      display: flex; flex-direction: column; gap: 6px;
+      max-width: min(280px, calc(100vw - 24px));
+    }
+    #panel-body[hidden] { display: none; }
+    #panel .row { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+    #panel .row > span { min-width: 2.4em; opacity: .7; }
+    #panel button {
+      background: #ffffff14; color: #eaeaea; border: 1px solid #ffffff26;
+      border-radius: 5px; padding: 3px 8px; font: inherit; cursor: pointer;
+    }
+    #panel button:hover { background: #ffffff29; }
+    #panel .hint { opacity: .55; font-size: 11px; }
+    #panel label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+    #sceneinfo {
+      position: fixed; left: 0; bottom: max(0px, env(safe-area-inset-bottom));
+      margin: 0; color: #fff; font: 11px monospace; z-index: 9; opacity: .75;
+      max-width: 100%; white-space: pre-wrap; word-break: break-all;
+      pointer-events: none;
+    }
+    #sceneinfo[hidden] { display: none; }
   </style>
 </head>
 <body>

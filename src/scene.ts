@@ -3,6 +3,7 @@ import { HDRLoader } from 'three/addons/loaders/HDRLoader.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { latticeTexture, caihuaTexture } from './facadeTextures.js';
 import { SOURCED, planSegmentStack, eaveRadii, assertSourcedCounts, stairwayLayout } from './massing.js';
+import { FRAMING, cameraDistanceForViewport, framingFractions, type FramingOverrides } from './framing.js';
 
 // 祈年殿场景装配。所有**尺寸**来自 src/massing.ts（已由 tests/massing.test.ts 覆盖）；
 // 本文件只负责"把形制变成 three.js 物体"，不重新定义任何考据尺寸。
@@ -26,6 +27,45 @@ export interface SceneOptions {
   hdriUrl?: string;
   /** 'ortho' 用正交投影：屏幕距离与真实距离成正比，用于量测（无透视畸变） */
   projection?: 'perspective' | 'ortho';
+  /**
+   * 画布尺寸策略：
+   *  - 'fixed'（默认，门禁用）：严格用 width×height，DPR 钉 1 —— 保证截图跨机器字节一致
+   *  - 'viewport'：铺满视口 + 监听 resize + DPR min(dpr,2) —— 人看的形态
+   */
+  sizing?: 'fixed' | 'viewport';
+  /** 画质档：影响 DPR 上限与阴影贴图尺寸。门禁一律 'high'。 */
+  quality?: QualityTier;
+}
+
+/** 画质档位。门禁固定跑 'high'，以免截图基线随设备变化。 */
+export type QualityTier = 'high' | 'medium' | 'low';
+
+export interface QualitySettings {
+  tier: QualityTier;
+  /** DPR 上限 */
+  maxPixelRatio: number;
+  /** 阴影贴图边长 */
+  shadowMapSize: number;
+  /** 是否建瓦垄（detail>=1 时才生效） */
+  tileRidges: boolean;
+}
+
+export const QUALITY: Record<QualityTier, QualitySettings> = {
+  high: { tier: 'high', maxPixelRatio: 2, shadowMapSize: 2048, tileRidges: true },
+  medium: { tier: 'medium', maxPixelRatio: 1.5, shadowMapSize: 1024, tileRidges: true },
+  low: { tier: 'low', maxPixelRatio: 1, shadowMapSize: 512, tileRidges: false },
+};
+
+/**
+ * 按设备能力启发式选档。**一定会猜错某些设备**，故面板必须能手动覆盖（见 SPEC Q19）。
+ * 判据：DPR × 屏幕宽度 × 硬件并发数 —— 三个都可从浏览器直接读到，无需 UA 嗅探。
+ */
+export function pickQualityTier(nav?: { hardwareConcurrency?: number }, dpr = 1, screenW = 1280): QualityTier {
+  const cores = nav?.hardwareConcurrency ?? 4;
+  const load = dpr * screenW * cores;
+  if (load >= 16000) return 'high';
+  if (load >= 6000) return 'medium';
+  return 'low';
 }
 
 export interface EnvInfo {
@@ -36,14 +76,47 @@ export interface EnvInfo {
   pmrem: boolean;
 }
 
-// 机位表（固定，保证截图可复现）
-const CAMS: Record<string, { pos: [number, number, number]; look: [number, number, number] }> = {
+/**
+ * 机位表（固定，保证截图可复现）。
+ *
+ * `framing` 决定**距离**从哪来：
+ *  - `'rule'`（默认）：距离由 Q30 取景规则算出 —— 让建筑"占满宽度"且不切掉大殿本体。
+ *    注意预设的 pos 只用来定**方向**，其长度会被规则距离取代，否则 hero 的 96.4 m
+ *    会让台基只占屏宽 68%，违背"内容占满宽度"。
+ *  - `'preset'`：保留预设自身距离。仅 `top` 用它 —— 俯视是平面图，
+ *    其屏幕竖直方向的真实跨度是**台基进深 90.3 m**而非通高 36.8 m，
+ *    因此取景规则的前提（竖直跨度 = buildingHeight）不成立，套用会算错。
+ */
+const CAMS: Record<
+  string,
+  { pos: [number, number, number]; look: [number, number, number]; framing?: 'rule' | 'preset' }
+> = {
   hero: { pos: [0, 26, 96], look: [0, 17, 0] },
   front: { pos: [0, 17, 118], look: [0, 17, 0] },
   low: { pos: [0, 3.2, 82], look: [0, 22, 0] },
-  top: { pos: [0, 150, 0.01], look: [0, 0, 0] },
+  top: { pos: [0, 150, 0.01], look: [0, 0, 0], framing: 'preset' },
   elev: { pos: [0, 18.4, 300], look: [0, 18.4, 0] },
 };
+
+/** 取景规则是否适用于该机位（`top` 是平面图，不适用）。供测试与门禁断言使用。 */
+export function usesFramingRule(cam: string): boolean {
+  return (CAMS[cam] ?? CAMS.hero).framing !== 'preset';
+}
+
+/**
+ * 求某机位在某视口下的相机距离（把"方向来自预设、距离来自规则"这条策略集中在一处）。
+ * @param over 内容的**实测**尺寸。不传则用考据常量（台基直径 / 通高）。
+ */
+export function distanceForCam(
+  cam: string,
+  vp: { width: number; height: number },
+  over: FramingOverrides = {},
+): number {
+  const preset = CAMS[cam] ?? CAMS.hero;
+  const presetDist = new THREE.Vector3(...preset.pos)
+    .sub(new THREE.Vector3(...preset.look)).length();
+  return usesFramingRule(cam) ? cameraDistanceForViewport(vp, FRAMING.fovYDeg, over) : presetDist;
+}
 
 /** 统计几何的三角形数（index 存在时按 index 计）。 */
 function countTriangles(g: THREE.BufferGeometry): number {
@@ -108,6 +181,10 @@ export interface BuiltScene {
   render: (silhouette?: boolean) => void;
   /** 把相机切到预设机位（交互热键与截图门禁共用同一组机位定义）。 */
   setCamera: (which: string) => void;
+  /** 预设机位的注视点，供 OrbitControls.target 对齐。 */
+  presetTarget: (which: string) => THREE.Vector3;
+  /** 挂上视口变化监听；返回卸载函数。门禁模式（sizing='fixed'）返回空操作。 */
+  observeResize: () => () => void;
 }
 
 export function buildScene(opts: SceneOptions = {}): BuiltScene {
@@ -120,27 +197,58 @@ export function buildScene(opts: SceneOptions = {}): BuiltScene {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x8fb0d2);
 
+  const sizing = opts.sizing ?? 'fixed';
+  const quality = QUALITY[opts.quality ?? 'high'];
+
+  // 视口尺寸解析：
+  //  - 'fixed'（门禁）：严格用传入的 width/height，DPR 钉 1（截图跨机器字节一致）
+  //  - 'viewport'（人看）：铺满视口；显式传入 w/h 时仍以传入为准（门禁要钉死截图尺寸）
+  const resolveSize = (): { w: number; h: number } => {
+    if (opts.width && opts.height) return { w: opts.width, h: opts.height };
+    if (sizing === 'viewport') {
+      return {
+        w: Math.max(1, Math.floor(window.innerWidth)),
+        h: Math.max(1, Math.floor(window.innerHeight)),
+      };
+    }
+    return { w: opts.width ?? 1280, h: opts.height ?? 720 };
+  };
+  const size0 = resolveSize();
+
   let camera: THREE.Camera;
   if (opts.projection === 'ortho') {
-    // 正交水平机位：无透视畸变，屏幕上的宽度与真实半径成正比 —— 量测轮廓比例必须用这个。
+    // 正交水平机位：无透视畸变，屏幕上的宽度与真实距离成正比 —— 量测轮廓比例必须用这个。
     // 用俯视图量测檐口出挑比是错的：俯视每一行的宽度都是台基直径（实测得到 1:1:1）。
-    const halfW = 52, halfH = halfW * (9 / 16);
+    //
+    // **量测机位豁免自动取景**：正交半宽固定 52 m，不随窗口比例变化。
+    // 否则"出挑比"会随视口漂移 —— 形制优先的项目里，取景不应改变可量测的比例。
+    const halfW = 52;
+    const halfH = halfW * (size0.h / size0.w);
     const oc = new THREE.OrthographicCamera(-halfW, halfW, halfH, -halfH, 0.5, 4000);
     oc.position.set(0, 18.4, 300);
     oc.lookAt(new THREE.Vector3(0, 18.4, 0));
     oc.updateProjectionMatrix();
     camera = oc;
   } else {
-    const pc = new THREE.PerspectiveCamera(42, 16 / 9, 0.5, 4000);
-    const c = CAMS[camName] ?? CAMS.hero;
-    pc.position.set(...c.pos);
-    pc.lookAt(new THREE.Vector3(...c.look));
+    const pc = new THREE.PerspectiveCamera(FRAMING.fovYDeg, size0.w / size0.h, 0.5, 4000);
+    // 观察**方向**取自机位预设，**距离**由 distanceForCam 决定（见上方 CAMS 注释）。
+    const preset = CAMS[camName] ?? CAMS.hero;
+    const target = new THREE.Vector3(...preset.look);
+    const dir = new THREE.Vector3(...preset.pos).sub(target);
+    dir.setLength(distanceForCam(camName, { width: size0.w, height: size0.h }));
+    pc.position.copy(target).add(dir);
+    pc.lookAt(target);
     camera = pc;
   }
 
   const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
-  renderer.setPixelRatio(1);
-  renderer.setSize(opts.width ?? 1280, opts.height ?? 720);
+  // DPR：门禁钉 1（保证跨机器字节一致）；viewport 模式用 min(dpr, 画质档上限)——
+  // 1x 与 2x 清晰度差异肉眼可辨，2x→3x 几乎看不出但填充率差 2.25 倍。
+  const desiredDpr = sizing === 'viewport'
+    ? Math.min(window.devicePixelRatio || 1, quality.maxPixelRatio)
+    : 1;
+  renderer.setPixelRatio(desiredDpr);
+  renderer.setSize(size0.w, size0.h);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.15;
   renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -292,7 +400,7 @@ export function buildScene(opts: SceneOptions = {}): BuiltScene {
       rim.castShadow = true;
       scene.add(rim);
 
-      if (detail >= 1) {
+      if (detail >= 1 && quality.tileRidges) {
         const ridges = new THREE.Mesh(
           tileRidgeGeometry(rEave, rRidge, seg.height, upturn, 0.9, 0.6), glazeBlue,
         );
@@ -332,7 +440,7 @@ export function buildScene(opts: SceneOptions = {}): BuiltScene {
   const sun = new THREE.DirectionalLight(0xfff6e8, 3.4);
   sun.position.set(62, 88, 44);
   sun.castShadow = true;
-  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.mapSize.set(quality.shadowMapSize, quality.shadowMapSize);
   Object.assign(sun.shadow.camera, { near: 10, far: 340, left: -90, right: 90, top: 90, bottom: -90 });
   scene.add(sun);
   // 开 IBL 时必须下调分析式环境光，否则双重计光发白
@@ -348,6 +456,8 @@ export function buildScene(opts: SceneOptions = {}): BuiltScene {
   ground.rotation.x = -Math.PI / 2;
   ground.position.y = -0.02;
   ground.receiveShadow = true;
+  // 标记为地面：建筑本体包围盒与自动取景都要把它排除（半径 400 m 会把建筑缩成一点）
+  ground.userData.formTag = 'ground';
   scene.add(ground);
 
   const envInfo: EnvInfo = { requested: useEnv, loaded: false, error: null, pmrem: false };
@@ -398,6 +508,57 @@ export function buildScene(opts: SceneOptions = {}): BuiltScene {
     info.triangles = renderer.info.render.triangles;
   }
 
+  /**
+   * 视口变化时重设画布与投影。
+   * 之前完全没有 resize 处理：画布固定在 1280×720，透视相机的 aspect 也硬编码 16/9，
+   * 于是窗口一变，画面不是被裁就是被拉伸。
+   */
+  function applyViewportSize() {
+    if (sizing !== 'viewport' || (opts.width && opts.height)) return;   // 门禁模式尺寸由调用方钉死
+    const w = Math.max(1, Math.floor(window.innerWidth));
+    const h = Math.max(1, Math.floor(window.innerHeight));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, quality.maxPixelRatio));
+    renderer.setSize(w, h, false);
+    if (camera instanceof THREE.PerspectiveCamera) {
+      camera.aspect = w / h;
+      // 取景距离随视口重算：这样"占满"与"不切主体"在任何窗口比例下都成立
+      const which = (info.cam as string) ?? camName;
+      const preset = CAMS[which] ?? CAMS.hero;
+      const target = new THREE.Vector3(...preset.look);
+      const dir = camera.position.clone().sub(target);
+      dir.setLength(distanceForCam(which, { width: w, height: h }));
+      camera.position.copy(target).add(dir);
+      camera.lookAt(target);
+      camera.updateProjectionMatrix();
+    } else if (camera instanceof THREE.OrthographicCamera) {
+      // 量测机位：半宽固定，只按新宽高比修正半高（保持可量测的比例不变）
+      const halfW = 52;
+      camera.left = -halfW; camera.right = halfW;
+      camera.top = halfW * (h / w); camera.bottom = -halfW * (h / w);
+      camera.updateProjectionMatrix();
+    }
+    info.viewport = [w, h];
+    info.pixelRatio = renderer.getPixelRatio();
+    info.canvasSize = [renderer.domElement.width, renderer.domElement.height];
+  }
+
+  /** 让调用方（main.ts）在 mount 之后挂上 resize 监听；返回卸载函数。 */
+  function observeResize(): () => void {
+    if (sizing !== 'viewport') return () => {};
+    const onResize = () => applyViewportSize();
+    window.addEventListener('resize', onResize);
+    window.addEventListener('orientationchange', onResize);
+    // ResizeObserver 兜住"容器变了但窗口没变"的情况（如手机地址栏收起）
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(onResize) : null;
+    ro?.observe(document.documentElement);
+    applyViewportSize();
+    return () => {
+      window.removeEventListener('resize', onResize);
+      window.removeEventListener('orientationchange', onResize);
+      ro?.disconnect();
+    };
+  }
+
   // ---- 机器可读报告：供截图门禁断言 ------------------------------------------------------
   // IMPORTANT: counts are taken from the ASSEMBLED OBJECTS, not echoed from SOURCED.
   // An earlier version reported `columns: SOURCED.columns`, which meant a regression that
@@ -419,7 +580,40 @@ export function buildScene(opts: SceneOptions = {}): BuiltScene {
     if (tag === 'stair') builtStairFlights++;
     if (tag === 'eave') builtEaves++;
   });
-  const bbox = new THREE.Box3().setFromObject(scene);
+  // 建筑本体包围盒：**排除地面圆盘**。
+  // 场景里有个半径 400 m 的 CircleGeometry 作为地面；若直接 setFromObject(scene)，
+  // 得到的是 800 m 见方的外框，自动取景会把建筑缩成一个点（size 字段也曾因此报 800）。
+  // 判据：把地面标记为 formTag='ground' 并跳过；其余网格都属建筑。
+  const bbox = new THREE.Box3();
+  scene.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (!m.isMesh) return;
+    if (m.userData?.formTag === 'ground') return;
+    bbox.expandByObject(m);
+  });
+
+  // 用**实测**内容尺寸重算取景距离。
+  // 为什么不用考据常量：纳入台阶外挑与栏杆后，实测横向尺寸是 97.7 m，
+  // 而台基直径只有 90.3 m —— 按 90.3 取景会把台阶切出画面（实测确认）。
+  // 竖直方向取 max(建筑高, 最低点以下的地面留白) 之类不做；只用实测高度即可。
+  const measuredW = bbox.max.x - bbox.min.x;
+  const measuredH = bbox.max.y - bbox.min.y;
+  const contentOverride: FramingOverrides = {
+    buildingWidth: measuredW,
+    buildingHeight: measuredH,
+    // 可见宽度下限仍以**大殿本体**为准（不被台阶外挑放大），确保主体永不被切
+    minVisibleWidth: FRAMING.minVisibleWidth,
+  };
+  if (camera instanceof THREE.PerspectiveCamera) {
+    const which = camName;
+    const preset = CAMS[which] ?? CAMS.hero;
+    const target = new THREE.Vector3(...preset.look);
+    const dir = camera.position.clone().sub(target);
+    dir.setLength(distanceForCam(which, { width: size0.w, height: size0.h }, contentOverride));
+    camera.position.copy(target).add(dir);
+    camera.lookAt(target);
+    camera.updateProjectionMatrix();
+  }
   // 闭合检查必须建立在实际装配上，而不是照抄 plan 的数学结果 ——
   // 否则 fault=gap（把宝顶抬离屋面）这类构造故障永远不会被发现，门禁就成了摆设。
   // 两端都取自**实际加入场景的物体**：
@@ -465,6 +659,32 @@ export function buildScene(opts: SceneOptions = {}): BuiltScene {
     cam: camName, detail, facadeTextures: facadeOn,
     // 环境强度必须回读，否则"参数被接受但静默无效"无法被发现
     envint: envIntensity,
+    sizing,
+    quality: quality.tier,
+    // 取景与画布尺寸：供 S13 响应式门禁逐条断言（Q16 的 6 条）
+    viewport: [size0.w, size0.h],
+    pixelRatio: renderer.getPixelRatio(),
+    canvasSize: [renderer.domElement.width, renderer.domElement.height],
+    framing: (() => {
+      const w = size0.w, h = size0.h;
+      const d = camera instanceof THREE.PerspectiveCamera
+        ? camera.position.distanceTo(presetTarget(camName))
+        : 0;
+      const f = camera instanceof THREE.PerspectiveCamera
+        ? framingFractions({ width: w, height: h }, d, FRAMING.fovYDeg, contentOverride)
+        : { mode: 'ortho-fixed' as const, heightFraction: 0, widthFraction: 0, visibleWidth: 0, distance: 0 };
+      return {
+        mode: f.mode,
+        distance: +d.toFixed(2),
+        heightFraction: +(f.heightFraction ?? 0).toFixed(4),
+        widthFraction: +(f.widthFraction ?? 0).toFixed(4),
+        visibleWidth: +(f.visibleWidth ?? 0).toFixed(2),
+        buildingWidth: FRAMING.buildingWidth,
+        buildingHeight: FRAMING.buildingHeight,
+        // 实测内容尺寸：取景用它的横向值（含台阶外挑），供门禁核对
+        measuredContentSize: [+measuredW.toFixed(2), +measuredH.toFixed(2)],
+      };
+    })(),
     triangles: Math.round(triangles),
     drawCalls: renderer.info.render.calls,
     materials: materials.size,
@@ -492,15 +712,38 @@ export function buildScene(opts: SceneOptions = {}): BuiltScene {
   function setCamera(which: string) {
     const c2 = CAMS[which];
     if (!c2) return;
+    const target = new THREE.Vector3(...c2.look);
     if (camera instanceof THREE.PerspectiveCamera) {
-      camera.position.set(...c2.pos);
-      camera.lookAt(new THREE.Vector3(...c2.look));
+      const dir = new THREE.Vector3(...c2.pos).sub(target);
+      // 距离由 distanceForCam 决定（top 保留预设距离，其余按取景规则）
+      const w = renderer.domElement.clientWidth || renderer.domElement.width;
+      const h = renderer.domElement.clientHeight || renderer.domElement.height;
+      dir.setLength(distanceForCam(which, { width: w, height: h }));
+      camera.position.copy(target).add(dir);
+      camera.lookAt(target);
+      camera.updateProjectionMatrix();
+    } else if (camera instanceof THREE.OrthographicCamera) {
+      // 之前只用 instanceof PerspectiveCamera 判断 ⇒ 正交模式下按 1–5 完全无操作（既有缺陷）。
+      // 正交量测机位只承认 elev（水平正立面）；其余预设会破坏量测几何，故不改位置。
+      if (which === 'elev') {
+        camera.position.set(0, 18.4, 300);
+        camera.lookAt(new THREE.Vector3(0, 18.4, 0));
+      }
       camera.updateProjectionMatrix();
     }
     info.cam = which;
   }
 
-  return { scene, camera, renderer, info, loadEnvironment, render, setCamera };
+  /** 预设机位的注视点。供 main.ts 对齐 OrbitControls.target，避免"切了机位又被拽回去"。 */
+  function presetTarget(which: string): THREE.Vector3 {
+    const c2 = CAMS[which] ?? CAMS.hero;
+    return new THREE.Vector3(...c2.look);
+  }
+
+  return {
+    scene, camera, renderer, info, loadEnvironment, render, setCamera,
+    presetTarget, observeResize,
+  };
 }
 
 /** 汉白玉栏杆：108 栏板/层（《北京文博》2000「各层栏板数均为一百零八块」）。 */
