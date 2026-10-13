@@ -147,11 +147,18 @@ try {
   const dPos1 = Math.hypot(...after1.pos.map((v, i) => v - before1.pos[i]));
   const dDist1 = Math.abs(after1.dist - before1.dist);
   const pct1 = await pixelDiffPct(page, px1);
-  const rotateOk = dPos1 > ROTATE_MIN_POS_DELTA && dDist1 < DOLLY_EPS;
-  if (!rotateOk) failures.push(`CDP single-finger drag did not rotate (dPos=${dPos1.toFixed(2)}, dDist=${dDist1.toFixed(3)})`);
+  // 同时要求"相机数值变了"与"像素确实变了"。前者证明走了 _onTouchStart，
+  // 后者证明这一帧真的被重绘 —— 两者都过才算真旋转（只用其一会漏掉"数值动了但没渲染"）。
+  const rotateOk = dPos1 > ROTATE_MIN_POS_DELTA && dDist1 < DOLLY_EPS && pct1 > PIXEL_THRESHOLD;
+  if (!rotateOk) {
+    failures.push(
+      `CDP single-finger drag did not rotate (dPos=${dPos1.toFixed(2)}, dDist=${dDist1.toFixed(3)}, pixelPct=${pct1.toFixed(2)} <= ${PIXEL_THRESHOLD})`,
+    );
+  }
   results.push({
     check: 'cdp_single_finger_drag_rotates',
     dPos: +dPos1.toFixed(3), dDist: +dDist1.toFixed(4), pixelPct: +pct1.toFixed(2),
+    pixelThreshold: PIXEL_THRESHOLD,
     ok: rotateOk,
   });
 

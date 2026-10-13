@@ -165,10 +165,11 @@ $Base = "http://127.0.0.1:$Port/"
 # 服务未起来时，后续步骤必须显式记 FAIL —— 绝不静默跳过（否则脚本会"绿色退出"但没做检查）
 if (-not $ServerUp) {
     foreach ($n in 'S6-gate', 'S7-selftest', 'S8-paramguard', 'S9-ratios', 'S9b-ratio-selftest',
-                    'S11-glaze', 'S12-offline', 'S13-layout', 'S14-touch', 'S10-determinism') {
+                    'S11-glaze', 'S12-offline', 'S13-layout', 'S14-touch', 'S15-reframe',
+                    'S10-determinism') {
         Record $n $false 'skipped: preview server did not start'
     }
-    Say "`n[!] 预览服务未启动，S6–S14 全部记为 FAIL（不静默跳过）"
+    Say "`n[!] 预览服务未启动，S6–S15 全部记为 FAIL（不静默跳过）"
 }
 
 # ============================================================ S6 截图门禁
@@ -419,6 +420,29 @@ if ($ServerUp) {
     Record 'S14-touch' $touchOk 'drag rotates, pinch dollies reversibly, disabled control stays put'
 }
 
+# ============================================================ S15 取景在 resize/切机位后不退化
+if ($ServerUp) {
+    Say "`n===== S15 取景不退化（resize 与切机位后仍用实测尺寸）====="
+    # 为什么单独一步：审查发现初版只在初始构建时传入实测内容尺寸，
+    # applyViewportSize / setCamera 漏传 ⇒ resize 或切机位后退回考据常量 90.3 m，把台阶切掉。
+    # 这类"初始正确、后续退化"的 bug 在单张截图里完全看不出来，必须专门驱动这两个操作。
+    Push-Location $Root
+    $r = Logged 'S15-reframe' { & node (Join-Path $Root 'scripts\verify-reframe.mjs') $Base }
+    Pop-Location
+    $rj = $null; $rParsed = $false
+    $m3 = [regex]::Match($r.Text, '\{.*\}', 'Singleline')
+    if ($m3.Success) { try { $rj = $m3.Value | ConvertFrom-Json; $rParsed = $true } catch { $rParsed = $false } }
+    $reframeOk = ($r.Exit -eq 0) -and $rParsed
+    $det3 = [System.Collections.Generic.List[string]]::new()
+    if ($rParsed) {
+        foreach ($c in $rj.results) { $det3.Add(("  {0,-46} ok={1}" -f $c.check, $c.ok)) }
+        if ($rj.failures.Count) { $det3.Add("  FAILURES: " + ($rj.failures -join '; ')) }
+    } else { $det3.Add("  output unparsable (exit=$($r.Exit))") }
+    $det3 | ForEach-Object { Say $_ }
+    ($det3 -join "`n") | Out-File (Join-Path $LogDir 'S15-reframe.log') -Encoding utf8
+    Record 'S15-reframe' $reframeOk 'framing keeps measured content size after resize and camera switch'
+}
+
 # ============================================================ S10 确定性
 if ($ServerUp) {
     Say "`n===== S10 确定性（连跑两次截图必须字节一致）====="
@@ -468,8 +492,8 @@ foreach ($r in $Results) {
 $lines.Add('')
 $lines.Add("TOTAL $pass/$total PASS  (silentSkips=$skipped explicitSkips=$explicitSkips)")
 # 覆盖率守卫：步骤齐备且无**静默**跳过，防止"绿色但没跑关键检查"的假阳性。
-# 下限 16 = S0..S14（含 S9b、S11、S12、S13、S14），使"少记录一步"这类问题无法绕开守卫。
-$expectedSteps = 16
+# 下限 17 = S0..S15（含 S9b、S11、S12、S13、S14、S15），使"少记录一步"无法绕开守卫。
+$expectedSteps = 17
 $guard = ($total -ge $expectedSteps -and $skipped -eq 0)
 if ($total -lt $expectedSteps) { $lines.Add("GUARD FAIL: only $total steps recorded, expected >= $expectedSteps") }
 if ($skipped -gt 0) { $lines.Add("GUARD FAIL: $skipped step(s) were silently skipped") }

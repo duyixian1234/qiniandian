@@ -1,4 +1,4 @@
-import { buildScene, pickQualityTier, type QualityTier } from './scene.js';
+import { buildScene, pickQualityTier, resolveQualityTier, type QualityTier } from './scene.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { ViewHelper } from 'three/addons/helpers/ViewHelper.js';
 
@@ -27,9 +27,13 @@ const wantControls = q.get('controls') !== '0';
 const wantHud = q.get('hud') === '1';
 
 // 画质档：auto 时按设备能力启发式选；面板可手动覆盖。
+// **门禁路径（显式给了 w/h）一律 high**，否则档位随运行设备的核数/DPR 变化，
+// 截图基线就不稳定 —— SPEC R2 要求"门禁一律 high"，必须真的钉住而不是碰巧。
 const qualityParam = q.get('quality') ?? 'auto';
 const autoTier = pickQualityTier(navigator, window.devicePixelRatio || 1, window.screen?.width ?? 1280);
-const quality: QualityTier = qualityParam === 'auto' ? autoTier : (qualityParam as QualityTier);
+const quality: QualityTier = hasExplicitSize
+  ? 'high'
+  : resolveQualityTier(qualityParam, autoTier);
 
 const built = buildScene({
   cam: q.get('cam') ?? 'hero',
@@ -50,6 +54,13 @@ const built = buildScene({
 });
 
 document.body.appendChild(built.renderer.domElement);
+
+// **唯一的**报告对象。全流程（scene.ts 的 setCamera/render/applyViewportSize 也持有它）
+// 只存在这一个实例，绝不复制 —— 复制会让后续字段更新静默丢失（本项目踩过两次）。
+const info = built.info;
+info.controls = wantControls;
+info.hudVisible = wantHud;
+info.quality = quality;
 
 const PRESETS: Record<string, string> = {
   Digit1: 'hero', Digit2: 'front', Digit3: 'low', Digit4: 'top', Digit5: 'elev',
@@ -106,13 +117,19 @@ async function main() {
     controls.maxDistance = 360;
     controls.update();
 
+    let lastFrame = performance.now();
     const animate = () => {
       requestAnimationFrame(animate);
+      const now = performance.now();
+      const delta = (now - lastFrame) / 1000;
+      lastFrame = now;
       controls!.update();
       built.renderer.render(built.scene, built.camera);
       // ViewHelper 是 3D 方位指示器（立方体 + 轴标签），必须在主场景渲染之后
       // 渲染到自己的视口 —— 它会接管 renderer.setViewport，故不能与剪影模式混用。
       if (viewHelper && !silhouette) {
+        // update(delta) 推进"点轴后平滑转过去"的动画；不调用则点击后不会动。
+        if (viewHelper.animating) viewHelper.update(delta);
         built.renderer.autoClear = false;
         viewHelper.render(built.renderer);
         built.renderer.autoClear = true;
@@ -122,7 +139,17 @@ async function main() {
 
     // 相机操控可视化：ViewHelper（three 0.186.1 自带，constructor(camera, domElement)）
     viewHelper = new ViewHelper(built.camera, built.renderer.domElement);
-    viewHelper.setLabels('右', '上', '前');
+    // 标签用 ASCII：ViewHelper 内部固定用 `24px Arial`，而本项目页面字体不含中文字形，
+    // 用 '右/上/前' 会渲染成豆腐块。要中文得先改它的 setLabelStyle 字体并确保字体有 CJK 字形。
+    viewHelper.setLabels('X', 'Y', 'Z');
+    // 点击方位立方体的某个轴 → 把相机转到对应正视角。
+    // 不注册这个监听，ViewHelper 就只是装饰（审查发现：点击是静默无操作）。
+    // 注意 handleClick(event) 接收的是**原始 PointerEvent** —— 它自己在内部
+    // 用 domElement.getBoundingClientRect() 与 this.location 换算 NDC，
+    // 所以不能再手动把坐标转成 NDC 传进去（那样会重复变换）。
+    built.renderer.domElement.addEventListener('pointerdown', (event) => {
+      viewHelper!.handleClick(event);
+    });
 
     // 显式暴露控件实例，供触摸验证脚本读取**精确**的相机数值。
     // 探针曾用 patch Function.prototype.bind 的 hack 拿到它；我们既然能改源码，
@@ -136,7 +163,7 @@ async function main() {
       const cap = t === 'high' ? 2 : t === 'medium' ? 1.5 : 1;
       built.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, cap));
       built.renderer.shadowMap.needsUpdate = true;
-      (built.info as Record<string, unknown>).quality = t;
+      info.quality = t;
     };
 
     const panel = buildPanel();
@@ -191,19 +218,10 @@ async function main() {
   // HUD 默认**隐藏**（?hud=1 才显示）。它是一行 ~1100 字符的 JSON，
   // 在 390px 视口上渲染宽 6701px，既遮挡观感又与面板叠层。
   // 门禁不依赖它（capture.mjs 用 page.evaluate 读 window.__SCENE__）。
-  //
-  // 注意顺序：`info` 是**唯一**的报告对象，setHud 直接写它的字段。
-  // 首版是 `const info = {...built.info}` 之后再 `setHud()` 写 `built.info.hudVisible`，
-  // 于是字段写进了另一份对象、永远到不了 __SCENE__ ⇒ hudHidden 断言全部失败
-  // （这正是"字段存在但永远读不到"的又一类静默 bug，由门禁实测发现）。
-  const info: Record<string, unknown> = {
-    ...built.info,
-    controls: wantControls,
-    hudVisible: wantHud,
-    assertions: {
-      ...(built.info.assertions as Record<string, unknown>),
-      envLoadedOk: !env.requested || env.loaded,
-    },
+  // info 已在模块作用域声明为**唯一**报告对象（见文件上方注释）。
+  info.assertions = {
+    ...(info.assertions as Record<string, unknown>),
+    envLoadedOk: !env.requested || env.loaded,
   };
 
   let hudEl: HTMLPreElement | null = null;
@@ -212,9 +230,8 @@ async function main() {
     if (on && !hudEl) {
       hudEl = document.createElement('pre');
       hudEl.id = 'sceneinfo';
-      hudEl.style.cssText =
-        'position:fixed;left:0;bottom:0;margin:0;color:#fff;font:11px monospace;z-index:9;opacity:.75;'
-        + 'max-width:100%;white-space:pre-wrap;word-break:break-all;pointer-events:none';
+      // 样式由 index.html 的 #sceneinfo 规则提供，此处不再内联重复
+      // （原先内联一份 + CSS 一份，两处已漂移：内联那份丢了 safe-area）
       document.body.appendChild(hudEl);
     }
     if (hudEl) {

@@ -44,7 +44,11 @@ try {
     page.on('pageerror', (e) => errs.push('pageerror: ' + e.message));
     const url = fixed
       ? `${baseUrl}?w=${vp.width}&h=${vp.height}&hud=0&controls=0`
-      : `${baseUrl}?hud=0`;
+      // 视口模式**也**显式关掉控件：SPEC R5 要求"门禁根本不构造控件"。
+      // 只传 hud=0 会构造 OrbitControls，而它的构造函数自己会 update() 一次
+      // 并按 target 重瞄相机 —— 那会让"布局断言"顺带受相机姿态影响。
+      // （S14 触摸轨是另一回事，它按 SPEC 明确使用 controls=1。）
+      : `${baseUrl}?hud=0&controls=0`;
     await page.goto(url, { waitUntil: 'load', timeout: 30000 });
     await page.waitForFunction(() => window.__SCENE__ !== undefined, null, { timeout: 30000 });
     await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));

@@ -98,6 +98,9 @@ const CAMS: Record<
   elev: { pos: [0, 18.4, 300], look: [0, 18.4, 0] },
 };
 
+/** 正交量测机位的固定半宽（米）。单一定义，量测豁免与 resize 共用，避免两处 52 漂移。 */
+const ORTHO_HALF_WIDTH = 52;
+
 /** 取景规则是否适用于该机位（`top` 是平面图，不适用）。供测试与门禁断言使用。 */
 export function usesFramingRule(cam: string): boolean {
   return (CAMS[cam] ?? CAMS.hero).framing !== 'preset';
@@ -116,6 +119,16 @@ export function distanceForCam(
   const presetDist = new THREE.Vector3(...preset.pos)
     .sub(new THREE.Vector3(...preset.look)).length();
   return usesFramingRule(cam) ? cameraDistanceForViewport(vp, FRAMING.fovYDeg, over) : presetDist;
+}
+
+/**
+ * 校验 quality 参数，非法值回退并对调用方可见。
+ * 之前是 `QUALITY[opts.quality ?? 'high']` 直接查表 —— `?quality=x` 会得到 undefined，
+ * 随后读 `quality.maxPixelRatio` 抛 TypeError（前端白屏）。查询参数是不可信输入，必须校验。
+ */
+export function resolveQualityTier(raw: string | undefined | null, fallback: QualityTier = 'high'): QualityTier {
+  if (raw === undefined || raw === null || raw === '' || raw === 'auto') return fallback;
+  return raw === 'high' || raw === 'medium' || raw === 'low' ? raw : fallback;
 }
 
 /** 统计几何的三角形数（index 存在时按 index 计）。 */
@@ -198,7 +211,8 @@ export function buildScene(opts: SceneOptions = {}): BuiltScene {
   scene.background = new THREE.Color(0x8fb0d2);
 
   const sizing = opts.sizing ?? 'fixed';
-  const quality = QUALITY[opts.quality ?? 'high'];
+  // 查询参数不可信：非法 quality 一律回退，而不是让 undefined 在后续读属性时抛错
+  const quality = QUALITY[resolveQualityTier(opts.quality)];
 
   // 视口尺寸解析：
   //  - 'fixed'（门禁）：严格用传入的 width/height，DPR 钉 1（截图跨机器字节一致）
@@ -215,6 +229,14 @@ export function buildScene(opts: SceneOptions = {}): BuiltScene {
   };
   const size0 = resolveSize();
 
+  // 内容的**实测**尺寸（含台阶外挑），在装配完成、包围盒量出后填入。
+  // 关键：它是**可变状态**，且必须被**所有**取景路径读到 —— 初版只在初始构建时传了它，
+  // 结果 applyViewportSize（resize 后）与 setCamera（切机位后）退回考据常量 90.3 m，
+  // 把台阶切出画面。这是审查抓到的硬缺陷。
+  let contentOverride: FramingOverrides = {};
+  // 记录最近一次已知的视口尺寸，使"量出包围盒后重新取景"能被统一驱动
+  let lastW = size0.w, lastH = size0.h;
+
   let camera: THREE.Camera;
   if (opts.projection === 'ortho') {
     // 正交水平机位：无透视畸变，屏幕上的宽度与真实距离成正比 —— 量测轮廓比例必须用这个。
@@ -222,24 +244,43 @@ export function buildScene(opts: SceneOptions = {}): BuiltScene {
     //
     // **量测机位豁免自动取景**：正交半宽固定 52 m，不随窗口比例变化。
     // 否则"出挑比"会随视口漂移 —— 形制优先的项目里，取景不应改变可量测的比例。
-    const halfW = 52;
-    const halfH = halfW * (size0.h / size0.w);
-    const oc = new THREE.OrthographicCamera(-halfW, halfW, halfH, -halfH, 0.5, 4000);
+    const oc = new THREE.OrthographicCamera(-ORTHO_HALF_WIDTH, ORTHO_HALF_WIDTH, 1, -1, 0.5, 4000);
     oc.position.set(0, 18.4, 300);
     oc.lookAt(new THREE.Vector3(0, 18.4, 0));
-    oc.updateProjectionMatrix();
+    setOrthoExtent(oc, size0.w, size0.h);
     camera = oc;
   } else {
     const pc = new THREE.PerspectiveCamera(FRAMING.fovYDeg, size0.w / size0.h, 0.5, 4000);
-    // 观察**方向**取自机位预设，**距离**由 distanceForCam 决定（见上方 CAMS 注释）。
-    const preset = CAMS[camName] ?? CAMS.hero;
+    camera = pc;
+    // 先按考据常量摆一次，装配出包围盒后再用实测尺寸复摆（见下方 frameCamera 调用）
+    framePerspectiveCamera(pc, camName, size0.w, size0.h, {});
+  }
+
+  /** 正交量测机位：半宽固定，只按宽高比修正半高（保持可量测的比例不变）。 */
+  function setOrthoExtent(oc: THREE.OrthographicCamera, w: number, h: number) {
+    oc.left = -ORTHO_HALF_WIDTH; oc.right = ORTHO_HALF_WIDTH;
+    oc.top = ORTHO_HALF_WIDTH * (h / w); oc.bottom = -ORTHO_HALF_WIDTH * (h / w);
+    oc.updateProjectionMatrix();
+  }
+
+  /**
+   * 把透视相机按"预设定方向 + 取景规则定距离"摆好。**唯一的取景实现**，三个调用点共用：
+   * 初始构建、resize、切机位。初版把这段逻辑抄了三遍，导致只有一处带 measured 覆盖。
+   */
+  function framePerspectiveCamera(
+    pc: THREE.PerspectiveCamera, cam: string, w: number, h: number, over: FramingOverrides,
+  ) {
+    const preset = CAMS[cam] ?? CAMS.hero;
     const target = new THREE.Vector3(...preset.look);
-    const dir = new THREE.Vector3(...preset.pos).sub(target);
-    dir.setLength(distanceForCam(camName, { width: size0.w, height: size0.h }));
+    const dir = pc.position.clone().sub(target);
+    // 方向取自预设（用预设的 pos-target 方向，而不是相机当前位置，避免累积漂移）
+    dir.copy(new THREE.Vector3(...preset.pos)).sub(target);
+    dir.setLength(distanceForCam(cam, { width: w, height: h }, over));
     pc.position.copy(target).add(dir);
     pc.lookAt(target);
-    camera = pc;
+    pc.updateProjectionMatrix();
   }
+
 
   const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
   // DPR：门禁钉 1（保证跨机器字节一致）；viewport 模式用 min(dpr, 画质档上限)——
@@ -519,23 +560,13 @@ export function buildScene(opts: SceneOptions = {}): BuiltScene {
     const h = Math.max(1, Math.floor(window.innerHeight));
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, quality.maxPixelRatio));
     renderer.setSize(w, h, false);
+    lastW = w; lastH = h;
     if (camera instanceof THREE.PerspectiveCamera) {
       camera.aspect = w / h;
-      // 取景距离随视口重算：这样"占满"与"不切主体"在任何窗口比例下都成立
-      const which = (info.cam as string) ?? camName;
-      const preset = CAMS[which] ?? CAMS.hero;
-      const target = new THREE.Vector3(...preset.look);
-      const dir = camera.position.clone().sub(target);
-      dir.setLength(distanceForCam(which, { width: w, height: h }));
-      camera.position.copy(target).add(dir);
-      camera.lookAt(target);
-      camera.updateProjectionMatrix();
+      // 必须带上 contentOverride（实测尺寸）—— 漏传会用 90.3 m 把台阶切掉
+      framePerspectiveCamera(camera, (info.cam as string) ?? camName, w, h, contentOverride);
     } else if (camera instanceof THREE.OrthographicCamera) {
-      // 量测机位：半宽固定，只按新宽高比修正半高（保持可量测的比例不变）
-      const halfW = 52;
-      camera.left = -halfW; camera.right = halfW;
-      camera.top = halfW * (h / w); camera.bottom = -halfW * (h / w);
-      camera.updateProjectionMatrix();
+      setOrthoExtent(camera, w, h);
     }
     info.viewport = [w, h];
     info.pixelRatio = renderer.getPixelRatio();
@@ -595,24 +626,18 @@ export function buildScene(opts: SceneOptions = {}): BuiltScene {
   // 用**实测**内容尺寸重算取景距离。
   // 为什么不用考据常量：纳入台阶外挑与栏杆后，实测横向尺寸是 97.7 m，
   // 而台基直径只有 90.3 m —— 按 90.3 取景会把台阶切出画面（实测确认）。
-  // 竖直方向取 max(建筑高, 最低点以下的地面留白) 之类不做；只用实测高度即可。
   const measuredW = bbox.max.x - bbox.min.x;
   const measuredH = bbox.max.y - bbox.min.y;
-  const contentOverride: FramingOverrides = {
+  // 写入**模块级可变状态**（本函数闭包内），使 resize 与 setCamera 也能读到实测尺寸。
+  // 初版把它做成局部 const，只有初始构建用它 —— 审查抓到的硬缺陷。
+  contentOverride = {
     buildingWidth: measuredW,
     buildingHeight: measuredH,
     // 可见宽度下限仍以**大殿本体**为准（不被台阶外挑放大），确保主体永不被切
     minVisibleWidth: FRAMING.minVisibleWidth,
   };
   if (camera instanceof THREE.PerspectiveCamera) {
-    const which = camName;
-    const preset = CAMS[which] ?? CAMS.hero;
-    const target = new THREE.Vector3(...preset.look);
-    const dir = camera.position.clone().sub(target);
-    dir.setLength(distanceForCam(which, { width: size0.w, height: size0.h }, contentOverride));
-    camera.position.copy(target).add(dir);
-    camera.lookAt(target);
-    camera.updateProjectionMatrix();
+    framePerspectiveCamera(camera, camName, lastW, lastH, contentOverride);
   }
   // 闭合检查必须建立在实际装配上，而不是照抄 plan 的数学结果 ——
   // 否则 fault=gap（把宝顶抬离屋面）这类构造故障永远不会被发现，门禁就成了摆设。
@@ -670,6 +695,26 @@ export function buildScene(opts: SceneOptions = {}): BuiltScene {
       const d = camera instanceof THREE.PerspectiveCamera
         ? camera.position.distanceTo(presetTarget(camName))
         : 0;
+      // `top` 豁免取景规则（平面图，屏幕竖直跨度是台基进深 90.3 m 而非通高 36.8 m），
+      // 故其 heightFraction/widthFraction 无物理意义 —— 显式标记，而不是报一个误导性的数字。
+      if (!usesFramingRule(camName)) {
+        return {
+          mode: 'preset-exempt' as const,
+          distance: +d.toFixed(2),
+          heightFraction: null,
+          widthFraction: null,
+          visibleWidth: null,
+          note: 'top 是平面图：屏幕竖直跨度是台基进深(90.3 m)，不是通高(36.8 m)，故不套用取景规则',
+          buildingWidth: FRAMING.buildingWidth,
+          buildingHeight: FRAMING.buildingHeight,
+          measuredContentSize: [+measuredW.toFixed(2), +measuredH.toFixed(2)],
+          thresholds: {
+            minHeightFraction: FRAMING.minHeightFraction,
+            minVisibleWidth: FRAMING.minVisibleWidth,
+            hallBodyWidth: FRAMING.hallBodyWidth,
+          },
+        };
+      }
       const f = camera instanceof THREE.PerspectiveCamera
         ? framingFractions({ width: w, height: h }, d, FRAMING.fovYDeg, contentOverride)
         : { mode: 'ortho-fixed' as const, heightFraction: 0, widthFraction: 0, visibleWidth: 0, distance: 0 };
@@ -719,16 +764,10 @@ export function buildScene(opts: SceneOptions = {}): BuiltScene {
   function setCamera(which: string) {
     const c2 = CAMS[which];
     if (!c2) return;
-    const target = new THREE.Vector3(...c2.look);
     if (camera instanceof THREE.PerspectiveCamera) {
-      const dir = new THREE.Vector3(...c2.pos).sub(target);
-      // 距离由 distanceForCam 决定（top 保留预设距离，其余按取景规则）
-      const w = renderer.domElement.clientWidth || renderer.domElement.width;
-      const h = renderer.domElement.clientHeight || renderer.domElement.height;
-      dir.setLength(distanceForCam(which, { width: w, height: h }));
-      camera.position.copy(target).add(dir);
-      camera.lookAt(target);
-      camera.updateProjectionMatrix();
+      // 共用同一取景实现，并带上**实测** contentOverride（漏传会退回 90.3 m 切掉台阶）
+      camera.aspect = lastW / lastH;
+      framePerspectiveCamera(camera, which, lastW, lastH, contentOverride);
     } else if (camera instanceof THREE.OrthographicCamera) {
       // 之前只用 instanceof PerspectiveCamera 判断 ⇒ 正交模式下按 1–5 完全无操作（既有缺陷）。
       // 正交量测机位只承认 elev（水平正立面）；其余预设会破坏量测几何，故不改位置。
