@@ -1,0 +1,16 @@
+
+ ⛅️ wrangler 4.149.0 (update available 4.150.0)
+───────────────────────────────────────────────
+▲ [WARNING] Warning: Your working directory is a git repo and has uncommitted changes
+
+  To silence this warning, pass in --commit-dirty=true
+
+
+Uploading... (0/4)
+Uploading... (1/4)
+Uploading... (2/4)
+Uploading... (4/4)
+✨ Success! Uploaded 4 files (4.76 sec)
+
+🌎 Deploying...
+✨ Deployment complete! Take a peek over at https://9949a3cd.qiniandian.pages.dev

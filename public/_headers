@@ -1,0 +1,32 @@
+# Cloudflare Pages 响应头规则（官方语法：路径行 + 缩进的 "名称: 值"）
+#
+# 为什么需要这个文件：部署后实测发现**所有**资源都是
+#   cache-control: public, max-age=0, must-revalidate
+# 于是 4.4 MB 的 HDRI 每次访问都要发条件请求重新验证。
+# 对首屏体验影响明显（该文件是场景光照与天空的唯一来源，必须加载完才能出画面）。
+#
+# 分成两类处理，依据"文件名是否带内容哈希"：
+#   /assets/*  —— Vite 产物，文件名内含内容哈希（如 index-D9Vr6-Ed.js），
+#                 内容一变文件名必变 ⇒ 可以 immutable 长缓存，安全。
+#   /hdri/*    —— 文件名**不含**哈希（kloofendal_43d_clear_puresky_2k.hdr 是上游固定名），
+#                 若设 immutable 则替换文件后旧缓存永不失效 ⇒ 用较长 max-age +
+#                 stale-while-revalidate，兼顾速度与可更新。
+#   HTML       —— 必须每次回源验证，否则部署新版本后用户仍拿到旧页面引用旧 chunk。
+
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+  X-Content-Type-Options: nosniff
+
+/hdri/*
+  Cache-Control: public, max-age=604800, stale-while-revalidate=86400
+  X-Content-Type-Options: nosniff
+
+/favicon.svg
+  Cache-Control: public, max-age=86400
+  X-Content-Type-Options: nosniff
+
+/*
+  # HTML 与其余入口：保持每次验证，保证部署后立刻生效
+  Cache-Control: public, max-age=0, must-revalidate
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
