@@ -1,0 +1,17 @@
+{
+  "preOverflowX": "visible",
+  "preOverflowY": "visible",
+  "preWhiteSpace": "pre",
+  "prePosition": "fixed",
+  "preClientW": 6701,
+  "preScrollW": 6701,
+  "preScrollableItself": false,
+  "preCssWidth": "6701.03px",
+  "preBoxSizing": "content-box",
+  "viewportW": 390,
+  "clippedPx": 6311.03125,
+  "bodyScrollW": 1280,
+  "docScrollW": 390,
+  "docClientW": 390,
+  "canScrollHorizontally": false
+}

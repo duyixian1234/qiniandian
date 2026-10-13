@@ -1,0 +1,10 @@
+{
+  "devicePixelRatio": 3,
+  "attrW": 390,
+  "attrH": 844,
+  "styleW": "390px",
+  "styleH": "844px",
+  "rectW": 390,
+  "canvasTouchAction": "auto",
+  "bodyTouchAction": "auto"
+}

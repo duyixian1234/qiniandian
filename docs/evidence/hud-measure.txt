@@ -1,0 +1,86 @@
+{
+  "desktop1280x720": {
+    "textLen": 1108,
+    "rect": {
+      "x": 0,
+      "y": 0,
+      "w": 6701.03125,
+      "h": 13
+    },
+    "offsetWidth": 6701,
+    "offsetHeight": 13,
+    "scrollWidth": 6701,
+    "scrollHeight": 13,
+    "whiteSpace": "pre",
+    "font": "11px monospace",
+    "opacity": "0.75",
+    "cssText": "position: fixed; left: 0px; top: 0px; margin: 0px; color: rgb(255, 255, 255); font: 11px monospace; z-index: 9; opacity: 0.75;",
+    "canvasAttr": {
+      "w": 1280,
+      "h": 720,
+      "cssW": "6701.03px"
+    },
+    "canvasRect": {
+      "x": 0,
+      "y": 0,
+      "w": 1280,
+      "h": 720
+    },
+    "html": {
+      "scrollWidth": 1280,
+      "clientWidth": 1280,
+      "scrollHeight": 720,
+      "clientHeight": 720,
+      "overflow": "hidden",
+      "bodyOverflow": "hidden"
+    },
+    "bodyChildren": [
+      "CANVAS",
+      "PRE#sceneinfo"
+    ],
+    "devicePixelRatio": 1,
+    "firstLineLen": 1108
+  },
+  "mobile390x844": {
+    "textLen": 1108,
+    "rect": {
+      "x": 0,
+      "y": 0,
+      "w": 6701.03125,
+      "h": 13
+    },
+    "offsetWidth": 6701,
+    "offsetHeight": 13,
+    "scrollWidth": 6701,
+    "scrollHeight": 13,
+    "whiteSpace": "pre",
+    "font": "11px monospace",
+    "opacity": "0.75",
+    "cssText": "position: fixed; left: 0px; top: 0px; margin: 0px; color: rgb(255, 255, 255); font: 11px monospace; z-index: 9; opacity: 0.75;",
+    "canvasAttr": {
+      "w": 1280,
+      "h": 720,
+      "cssW": "6701.03px"
+    },
+    "canvasRect": {
+      "x": 0,
+      "y": 0,
+      "w": 1280,
+      "h": 720
+    },
+    "html": {
+      "scrollWidth": 390,
+      "clientWidth": 390,
+      "scrollHeight": 844,
+      "clientHeight": 844,
+      "overflow": "hidden",
+      "bodyOverflow": "hidden"
+    },
+    "bodyChildren": [
+      "CANVAS",
+      "PRE#sceneinfo"
+    ],
+    "devicePixelRatio": 1,
+    "firstLineLen": 1108
+  }
+}

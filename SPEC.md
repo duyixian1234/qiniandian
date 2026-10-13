@@ -75,7 +75,7 @@
 2. **`setCamera` 对正交相机完全无效**：原先只用 `instanceof PerspectiveCamera` 判断，
    正交模式下按 1–5 什么都不会发生。现补正交分支。
 
-### 触摸验证的实现依据（探针实测，见 `.qiniandian-touch/REPORT.md`）
+### 触摸验证的实现依据（探针实测，见 `docs/evidence/touch-synthesis.md`）
 
 - `page.touchscreen` **只有 `tap()`**，没有拖拽/捏合助手 ⇒ 必须用 **CDP `Input.dispatchTouchEvent`**
 - CDP 触摸确实以 `pointerType==='touch'` 的 PointerEvent 送达 canvas，走 OrbitControls 的 `_onTouchStart`

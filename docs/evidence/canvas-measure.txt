@@ -1,0 +1,141 @@
+{
+  "desktop1280x720": {
+    "canvas": {
+      "attrW": 1280,
+      "attrH": 720,
+      "styleW": "1280px",
+      "styleH": "720px",
+      "computedW": "1280px",
+      "computedH": "720px",
+      "rectW": 1280,
+      "rectH": 720,
+      "rectX": 0,
+      "rectY": 0,
+      "right": 1280,
+      "bottom": 720
+    },
+    "sceneJsonLen": 1097,
+    "hudPresent": true,
+    "hudCssW": 6701.03125,
+    "bodyChildren": [
+      "CANVAS",
+      "PRE#sceneinfo"
+    ],
+    "docScrollW": 1280,
+    "docClientW": 1280,
+    "docScrollH": 720,
+    "docClientH": 720,
+    "hasHorizontalScroll": false
+  },
+  "mobile390x844": {
+    "canvas": {
+      "attrW": 1280,
+      "attrH": 720,
+      "styleW": "1280px",
+      "styleH": "720px",
+      "computedW": "1280px",
+      "computedH": "720px",
+      "rectW": 1280,
+      "rectH": 720,
+      "rectX": 0,
+      "rectY": 0,
+      "right": 1280,
+      "bottom": 720
+    },
+    "sceneJsonLen": 1097,
+    "hudPresent": true,
+    "hudCssW": 6701.03125,
+    "bodyChildren": [
+      "CANVAS",
+      "PRE#sceneinfo"
+    ],
+    "docScrollW": 390,
+    "docClientW": 390,
+    "docScrollH": 844,
+    "docClientH": 844,
+    "hasHorizontalScroll": false
+  },
+  "mobile390_no_wh": {
+    "canvas": {
+      "attrW": 1280,
+      "attrH": 720,
+      "styleW": "1280px",
+      "styleH": "720px",
+      "computedW": "1280px",
+      "computedH": "720px",
+      "rectW": 1280,
+      "rectH": 720,
+      "rectX": 0,
+      "rectY": 0,
+      "right": 1280,
+      "bottom": 720
+    },
+    "sceneJsonLen": 1097,
+    "hudPresent": true,
+    "hudCssW": 6701.03125,
+    "bodyChildren": [
+      "CANVAS",
+      "PRE#sceneinfo"
+    ],
+    "docScrollW": 390,
+    "docClientW": 390,
+    "docScrollH": 844,
+    "docClientH": 844,
+    "hasHorizontalScroll": false
+  },
+  "mobile390_w390h844": {
+    "canvas": {
+      "attrW": 390,
+      "attrH": 844,
+      "styleW": "390px",
+      "styleH": "844px",
+      "computedW": "390px",
+      "computedH": "844px",
+      "rectW": 390,
+      "rectH": 844,
+      "rectX": 0,
+      "rectY": 0,
+      "right": 390,
+      "bottom": 844
+    },
+    "sceneJsonLen": 1097,
+    "hudPresent": true,
+    "hudCssW": 6701.03125,
+    "bodyChildren": [
+      "CANVAS",
+      "PRE#sceneinfo"
+    ],
+    "docScrollW": 390,
+    "docClientW": 390,
+    "docScrollH": 844,
+    "docClientH": 844,
+    "hasHorizontalScroll": false
+  },
+  "mobile390_hud0": {
+    "canvas": {
+      "attrW": 1280,
+      "attrH": 720,
+      "styleW": "1280px",
+      "styleH": "720px",
+      "computedW": "1280px",
+      "computedH": "720px",
+      "rectW": 1280,
+      "rectH": 720,
+      "rectX": 0,
+      "rectY": 0,
+      "right": 1280,
+      "bottom": 720
+    },
+    "sceneJsonLen": null,
+    "hudPresent": false,
+    "hudCssW": null,
+    "bodyChildren": [
+      "CANVAS"
+    ],
+    "docScrollW": 390,
+    "docClientW": 390,
+    "docScrollH": 844,
+    "docClientH": 844,
+    "hasHorizontalScroll": false
+  }
+}
