@@ -27,3 +27,12 @@ preview.err
 .idea/
 *.swp
 .DS_Store
+
+# 部署/验证过程的临时日志（产物，不入库）
+.wr-*.log
+.vd.log
+.h*.out
+.h*.err
+.v*.out
+.v*.err
+
