@@ -11,24 +11,27 @@
 // 第 3 条的"可见宽度下限"是 Q30 的关键修正：我最初的方案在竖屏会切到大殿本体
 // （390x844 填满高度时可见宽度仅 17.0 m < 大殿 32.72 m），那不是适配而是切掉主体。
 
-import { SOURCED } from './massing.js';
+import {
+  FOV_Y_DEG, BUILDING_WIDTH, BUILDING_HEIGHT, HALL_BODY_WIDTH,
+  WIDTH_MARGIN, MIN_VISIBLE_WIDTH, MIN_HEIGHT_FRACTION,
+} from './framingConst.js';
 
 /** 取景参数。宽高取自**建筑本体**，不是场景包围盒（后者含半径 400 m 的地面圆盘）。 */
 export const FRAMING = {
   /** 相机竖直视场角（度）——必须与 PerspectiveCamera 的构造参数一致 */
-  fovYDeg: 42,
+  fovYDeg: FOV_Y_DEG,
   /** 建筑本体宽度：台基最下层直径（考据值 90.3 m） */
-  buildingWidth: SOURCED.terraceDiameters[0],
+  buildingWidth: BUILDING_WIDTH,
   /** 建筑本体高度：通高（考据值 36.8 m） */
-  buildingHeight: SOURCED.totalHeight,
+  buildingHeight: BUILDING_HEIGHT,
   /** 大殿身直径（考据值 32.72 m）——必须始终完整可见 */
-  hallBodyWidth: SOURCED.bodyDiameter,
+  hallBodyWidth: HALL_BODY_WIDTH,
   /** 两侧各留的余量（米），避免建筑贴死画面边缘 */
-  widthMargin: 1.6,
+  widthMargin: WIDTH_MARGIN,
   /** 可见宽度下限 = 大殿本体 + 两侧余量。**永不以切掉主体为代价换取占屏比例。** */
-  get minVisibleWidth() { return this.hallBodyWidth + this.widthMargin * 2; },
+  minVisibleWidth: MIN_VISIBLE_WIDTH,
   /** 建筑占屏高的目标下限 */
-  minHeightFraction: 0.45,
+  minHeightFraction: MIN_HEIGHT_FRACTION,
 } as const;
 
 export interface Viewport { width: number; height: number }

@@ -683,6 +683,13 @@ export function buildScene(opts: SceneOptions = {}): BuiltScene {
         buildingHeight: FRAMING.buildingHeight,
         // 实测内容尺寸：取景用它的横向值（含台阶外挑），供门禁核对
         measuredContentSize: [+measuredW.toFixed(2), +measuredH.toFixed(2)],
+        // 把**阈值本身**一并上报，使验证脚本不必自己硬编码一份（消除漂移风险）。
+        // 否则 src 改了阈值而脚本没改，会出现"测试通过但门禁用另一套标准"。
+        thresholds: {
+          minHeightFraction: FRAMING.minHeightFraction,
+          minVisibleWidth: FRAMING.minVisibleWidth,
+          hallBodyWidth: FRAMING.hallBodyWidth,
+        },
       };
     })(),
     triangles: Math.round(triangles),

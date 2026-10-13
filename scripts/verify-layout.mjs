@@ -22,9 +22,13 @@ const VIEWPORTS = [
   { name: 'ultrawide-2560x1080', width: 2560, height: 1080 },
 ];
 
-const MIN_HEIGHT_FRACTION = 0.45;
-const MIN_VISIBLE_WIDTH = 35.92;   // 大殿本体 32.72 + 两侧各 1.6（与 src/framing.ts 同阈值）
-const HALL_BODY = 32.72;
+// 阈值**不在此处硬编码**：由页面通过 window.__SCENE__.framing.thresholds 上报。
+// 理由：这些阈值（45% 占屏高、可见宽度下限、大殿本体宽）是 src/framingConst.ts 的单一来源；
+// 脚本再抄一份，就会出现"src 改了阈值而脚本没改"⇒ 门禁用另一套标准的漂移。
+// 首版确实抄了一份（MIN_HEIGHT_FRACTION=0.45 等），已改为回读。
+const FALLBACK_THRESHOLDS = { minHeightFraction: 0.45, minVisibleWidth: 35.92, hallBodyWidth: 32.72 };
+let thresholds = FALLBACK_THRESHOLDS;
+let thresholdsFromPage = false;
 
 const browser = await chromium.launch({ channel: 'msedge', headless: true });
 const results = [];
@@ -65,6 +69,12 @@ try {
 
     const checks = [];
     const near = (a, b, tol) => Math.abs(a - b) <= tol;
+    // 阈值取自页面上报（单一来源）；第一条视口读一次即可，后续沿用
+    const th = m.scene?.framing?.thresholds;
+    if (th && typeof th.minHeightFraction === 'number') {
+      thresholds = th;
+      thresholdsFromPage = true;
+    }
     checks.push(['canvas_width_eq_viewport', near(m.rect.w, vp.width, 1)]);
     checks.push(['canvas_height_eq_viewport', near(m.rect.h, vp.height, 1)]);
     checks.push(['canvas_aspect_eq_viewport', near(m.rect.w / m.rect.h, vp.width / vp.height, 0.01)]);
@@ -73,9 +83,9 @@ try {
     checks.push(['touch_action_none', m.style.touchAction === 'none']);
     // 取景（Q30）：占屏高与可见宽度两条约束
     const fr = m.scene.framing ?? {};
-    checks.push(['framing_height_fraction_ok', (fr.heightFraction ?? 0) >= MIN_HEIGHT_FRACTION - 1e-3]);
-    checks.push(['framing_visible_width_ok', (fr.visibleWidth ?? 0) >= MIN_VISIBLE_WIDTH - 1e-3]);
-    checks.push(['framing_hall_body_not_cropped', (fr.visibleWidth ?? 0) >= HALL_BODY - 1e-3]);
+    checks.push(['framing_height_fraction_ok', (fr.heightFraction ?? 0) >= thresholds.minHeightFraction - 1e-3]);
+    checks.push(['framing_visible_width_ok', (fr.visibleWidth ?? 0) >= thresholds.minVisibleWidth - 1e-3]);
+    checks.push(['framing_hall_body_not_cropped', (fr.visibleWidth ?? 0) >= thresholds.hallBodyWidth - 1e-3]);
     checks.push(['no_page_errors', errs.filter((e) => e.startsWith('pageerror:')).length === 0]);
 
     for (const [name, ok] of checks) if (!ok) failures.push(`${vp.name} -> ${name}`);
@@ -93,7 +103,19 @@ try {
   await browser.close();
 }
 
-console.log(JSON.stringify({ mode: fixed ? 'fixed' : 'viewport', failures, results }, null, 2));
+// 若阈值从未从页面上读到，说明页面没上报 —— 那就等于退回硬编码，必须显式失败，
+// 否则"阈值漂移"会以"脚本静默用自己那份"的形式重新混进来。
+if (!thresholdsFromPage) {
+  failures.push('thresholds were NOT reported by the page (fell back to hardcoded copy) — drift risk');
+}
+
+console.log(JSON.stringify({
+  mode: fixed ? 'fixed' : 'viewport',
+  thresholds,
+  thresholdsFromPage,
+  failures,
+  results,
+}, null, 2));
 if (failures.length) {
   console.error(`\nLAYOUT ASSERTIONS FAILED (${failures.length}):\n  ` + failures.join('\n  '));
   process.exit(1);
